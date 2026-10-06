@@ -43,30 +43,57 @@ const BAD=/instrutor|coordenador|coord\.|assinad|verifique|documento|data:|gov|_
 const norm=s=>(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const dm=d=>String(d).padStart(2,'0');
+function der(b,p){const t=b[p];let l=b[p+1],h=2;
+  if(l===128){let q=p+2;while(!(b[q]===0&&b[q+1]===0))q=der(b,q).e;return{t,s:p+2,e:q+2,p,ind:1,ce:q}}
+  if(l&128){const n=l&127;l=0;for(let i=0;i<n;i++)l=l*256+b[p+2+i];h=2+n}
+  return{t,s:p+h,e:p+h+l,p}}
+function kids(b,n){const a=[],lim=n.ind?n.ce:n.e;let p=n.s;while(p<lim){const k=der(b,p);a.push(k);p=k.e}return a}
+function cnOf(b,name){for(const set of kids(b,name))for(const seq of kids(b,set)){const [o,v]=kids(b,seq);
+  if(o&&o.e-o.s===3&&b[o.s]===0x55&&b[o.s+1]===4&&b[o.s+2]===3)return new TextDecoder(v.t===0x1e?'utf-16be':v.t===0x0c?'utf-8':'latin1').decode(b.slice(v.s,v.e))}return ''}
+function signerName(hex){
+  const b=new Uint8Array(hex.match(/../g).map(h=>parseInt(h,16)));
+  const sd=kids(b,kids(b,kids(b,der(b,0))[1])[0]);
+  const cs=kids(b,sd.find(k=>k.t===0xA0)).map(c=>{const ch=kids(b,kids(b,c)[0]),o=ch[0].t===0xA0?1:0,key=n=>b.slice(n.p,n.e).join(',');
+    return{iss:key(ch[o+2]),sub:key(ch[o+4]),cn:cnOf(b,ch[o+4])}});
+  const leaf=cs.find(c=>!cs.some(x=>x!==c&&x.iss===c.sub))||cs[0];
+  return leaf?leaf.cn.replace(/:\s*\d+\s*$/,'').trim():'';
+}
+function readSigs(buf){
+  const s=new TextDecoder('latin1').decode(buf),out=[],re=/\/Contents\s*<([0-9A-Fa-f]{200,})>/g;let m;
+  while((m=re.exec(s))){try{
+    const w=s.slice(Math.max(0,m.index-700),m.index+m[0].length+700),d=/\/M\s*\(D:(\d{4})(\d{2})(\d{2})/.exec(w),nome=signerName(m[1]);
+    if(nome&&!out.some(o=>norm(o.nome)===norm(nome)))out.push({nome,data:d?d[3]+'/'+d[2]+'/'+d[1]:''});
+  }catch(e){}}
+  return out;
+}
 async function extract(file){
-  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
   const tc=await (await pdf.getPage(1)).getTextContent();
-  return tc.items.map(i=>({s:i.str.trim(),x:i.transform[4],y:i.transform[5],w:i.width})).filter(i=>i.s);
+  const items=tc.items.map(i=>({s:i.str.trim(),x:i.transform[4],y:i.transform[5],w:i.width})).filter(i=>i.s);
+  return{items,sigs:readSigs(buf)};
 }
 function val(items,re,multi,cut){
   const l=items.filter(i=>re.test(i.s)).sort((a,b)=>b.y-a.y)[0];if(!l)return '';
   const m=re.exec(l.s);if(m[1])return m[1].trim();
-  const n=items.filter(i=>i!==l&&Math.abs(i.y-l.y)<(multi?10:9)&&i.x>l.x+l.w-2&&i.x<(cut||1e9));
+  const bl=items.filter(i=>i!==l&&/^(n[uú]cleo|turma|periodicidade|modalidade|hor[aá]rio|professor|coordenador|auxiliar):?$/i.test(i.s)&&i.x>l.x+l.w&&Math.abs(i.y-l.y)<6).map(i=>i.x);
+  const lim=Math.min(cut||1e9,...bl),x0=l.x+l.w-2;
+  const n=items.filter(i=>i!==l&&i.x>x0&&i.x<lim&&!/^20\d\d$/.test(i.s)&&Math.abs(i.y-l.y)<(multi?10:9));
   if(multi)return n.sort((a,b)=>b.y-a.y||a.x-b.x).map(i=>i.s).join(' ');
-  n.sort((a,b)=>a.x-b.x);return n[0]?n[0].s:'';
+  n.sort((a,b)=>Math.abs(a.y-l.y)-Math.abs(b.y-l.y)||a.x-b.x);return n[0]?n[0].s:'';
 }
-function analyze(items){
+function analyze(items,dsig){
   const C=[],A=[],I={};
   const add=(t,m)=>C.push({t,m});
   const mItem=items.find(i=>MES.indexOf(norm(i.s))>=0);const mi=mItem?MES.indexOf(norm(mItem.s)):undefined;
   const ano=+((items.find(i=>/^20\d\d$/.test(i.s))||{}).s);
-  I.Núcleo=val(items,/^n[uú]cleo:\s*(.*)$/i);I.Turma=val(items,/^turma:\s*(.*)$/i);
-  const prof=val(items,/^professor:\s*(.*)$/i),coord=val(items,/^coordenador:\s*(.*)$/i);
-  I.Professor=prof;I.Coordenador=coord;I.Horário=val(items,/^hor[aá]rio:?\s*(.*)$/i);
-  const per=val(items,/^periodicidade:?\s*(.*)$/i,true,mItem?mItem.x:1e9);I.Periodicidade=per;
+  const CUT=mItem?mItem.x:1e9;I.Núcleo=val(items,/^n[uú]cleo:\s*(.*)$/i,0,CUT);I.Turma=val(items,/^turma:\s*(.*)$/i,0,CUT);
+  const prof=val(items,/^professor:\s*(.*)$/i,0,CUT),coord=val(items,/^coordenador:\s*(.*)$/i,0,CUT);
+  I.Professor=prof;I.Coordenador=coord;I.Horário=val(items,/^hor[aá]rio:?\s*(.*)$/i,0,CUT);
+  const per=val(items,/^periodicidade:?\s*(.*)$/i,true,CUT);I.Periodicidade=per;
   if(mi==null||!ano)return{C:[{t:'er',m:'Não encontrei o mês/ano de referência na lista.'}],I,A};
   I.Mês=MES[mi]+'/'+ano;
-  const dias=Object.keys(DIA).filter(k=>norm(per).includes(k)).map(k=>DIA[k]);
+  const dias=Object.keys(DIA).filter(k=>norm(per).replace(/\s/g,'').includes(k)).map(k=>DIA[k]);
   const q=/(\d+)\s*vez/.exec(norm(per));
   if(!dias.length)return{C:[{t:'er',m:'Não consegui ler os dias da semana na periodicidade ("'+per+'").'}],I,A};
   if(q&&+q[1]!==dias.length)add('er','Periodicidade inconsistente: informa '+(+q[1])+' vez(es) por semana, mas lista '+dias.length+' dia(s).');
@@ -75,12 +102,14 @@ function analyze(items){
   const aula=[];for(let d=1;d<=dim;d++)if(dias.includes(new Date(ano,mi,d).getDay()))aula.push(d);
   add('ok','Dias de aula em '+I.Mês+': '+aula.join(', ')+' ('+aula.length+' aulas)');
   // assinaturas
-  const sig=items.filter(i=>/^data:\s*\d{2}\/\d{2}\/\d{4}/i.test(i.s)).map(d=>{
+  const ts=items.filter(i=>/^data:\s*\d{2}\/\d{2}\/\d{4}/i.test(i.s)).map(d=>{
     const n=items.filter(i=>Math.abs(i.x-d.x)<14&&i.y>d.y+3&&i.y<d.y+26&&!/documento|assinad|data:|verifique/i.test(i.s)).sort((a,b)=>a.y-b.y)[0];
     return{nome:n?n.s:'?',data:d.s.slice(6,16)};
   });
+  const sig=dsig&&dsig.length?dsig:ts;
   if(!sig.length)add('er','Nenhuma assinatura digital (gov.br) encontrada.');
   else{
+    add('ok','Assinaturas digitais encontradas ('+sig.length+'): '+sig.map(x=>x.nome+(x.data?' em '+x.data:'')).join('; '));
     const has=n=>sig.some(s=>{const a=norm(s.nome),b=norm(n);return b&&(a===b||a.includes(b)||b.includes(a))});
     [['Instrutor',prof],['Coordenador',coord]].forEach(([r,n])=>has(n)?add('ok',r+' assinou: '+n):add('er',r+' do cabeçalho ('+(n||'não lido')+') não consta entre os signatários.'));
     const out=sig.filter(s=>![prof,coord].some(n=>n&&(norm(s.nome).includes(norm(n))||norm(n).includes(norm(s.nome)))));
@@ -96,14 +125,14 @@ function analyze(items){
   const body=items.filter(i=>i.y<hy-3).sort((a,b)=>b.y-a.y),rows=[];
   body.forEach(i=>{const r=rows[rows.length-1];if(r&&Math.abs(r.y-i.y)<3.5)r.it.push(i);else rows.push({y:i.y,it:[i]})});
   rows.forEach(r=>{
-    const nome=r.it.filter(i=>i.x<L&&!/^\d+$/.test(i.s)&&/[a-zà-ÿ]/.test(i.s)&&!BAD.test(i.s)).sort((a,b)=>a.x-b.x).map(i=>i.s.replace(/^\d+\s+/,'')).join(' ').trim();
+    const nome=r.it.filter(i=>i.x<L&&!/^\d+$/.test(i.s)&&/[a-zà-ÿ]/.test(i.s)&&!BAD.test(i.s)).sort((a,b)=>a.x-b.x).map(i=>i.s.replace(/^\d+\s*/,'')).join(' ').trim();
     if(!nome)return;
     const mk={},inv=[],erros=[];
     r.it.forEach(i=>{const c=i.x+i.w/2;if(c<L||c>R)return;
       let d=ds.reduce((a,b)=>Math.abs(cx[b]-c)<Math.abs(cx[a]-c)?b:a);
       if(Math.abs(cx[d]-c)>sp*.6)return;
-      if(/^[PA]$/.test(i.s))mk[d]=i.s;else inv.push(dm(d)+' ("'+i.s+'")')});
-    const falta=aula.filter(d=>!mk[d]).map(dm),fora=Object.keys(mk).map(Number).filter(d=>!aula.includes(d)).map(d=>dm(d)+' ('+mk[d]+')');
+      if(/^[PA]$/.test(i.s))mk[d]=i.s;else if(/^[-–—]$/.test(i.s))mk[d]='-';else inv.push(dm(d)+' ("'+i.s+'")')});
+    const falta=aula.filter(d=>!mk[d]).map(dm),fora=Object.keys(mk).map(Number).filter(d=>!aula.includes(d)&&mk[d]!=='-').map(d=>dm(d)+' ('+mk[d]+')');
     if(!Object.keys(mk).length)erros.push('sem nenhum registro no mês');
     else{if(falta.length)erros.push('dia(s) de aula sem P/A: '+falta.join(', '));}
     if(fora.length)erros.push('marcação em dia sem aula: '+fora.join(', '));
@@ -111,9 +140,15 @@ function analyze(items){
     const nums=r.it.filter(i=>i.x+i.w/2>R&&/^\d+$/.test(i.s)).sort((a,b)=>a.x-b.x).map(i=>+i.s);
     const cA=Object.values(mk).filter(v=>v==='A').length,cP=Object.values(mk).filter(v=>v==='P').length;
     if(nums.length>=2&&(nums[0]!==cA||nums[1]!==cP))erros.push('totais impressos (A '+nums[0]+' / P '+nums[1]+') diferem do contado (A '+cA+' / P '+cP+')');
-    A.push({nome,erros});
+    A.push({nome,erros,p:cP,a:cA,dash:Object.values(mk).filter(v=>v==='-').length,blank:falta.length,mk});
   });
   if(!A.length)add('er','Não encontrei alunos na lista.');
+  else{
+    const dsh=aula.filter(d=>A.some(x=>x.mk[d]==='-')),bln=aula.filter(d=>A.some(x=>!x.mk[d])),mis=dsh.filter(d=>A.some(x=>x.mk[d]&&x.mk[d]!=='-')),lst=a=>a.length?' ('+a.map(dm).join(', ')+')':'';
+    add('ok','Dias previstos marcados com "-" (sem aula): '+dsh.length+lst(dsh));
+    add(bln.length?'er':'ok','Dias previstos em branco: '+bln.length+lst(bln));
+    if(mis.length)add('wa','Dia(s) com "-" para alguns alunos e P/A para outros: '+mis.map(dm).join(', '));
+  }
   return{C,I,A};
 }
 function render(name,r){
@@ -123,9 +158,9 @@ function render(name,r){
   const nErr=r.A.filter(a=>a.erros.length).length;
   let h='<div class="card"><div class="hd"><h2>'+esc(name)+'</h2><span class="bg '+st[0]+'">'+st[1]+'</span><dl>'+
     Object.entries(r.I).filter(([,v])=>v).map(([k,v])=>'<dt>'+k+'</dt><dd>'+esc(v)+'</dd>').join('')+'</dl></div>';
-  h+='<div class="sec"><h3>Periodicidade e assinaturas</h3><ul>'+r.C.map(c=>'<li class="'+c.t+'">'+esc(c.m)+'</li>').join('')+'</ul></div>';
+  h+='<div class="sec"><h3>Resumo da lista</h3><ul>'+r.C.map(c=>'<li class="'+c.t+'">'+esc(c.m)+'</li>').join('')+'</ul></div>';
   if(r.A.length)h+='<div class="sec"><h3>Alunos ('+r.A.length+' lidos, '+nErr+' com problema)</h3><ul>'+
-    r.A.map(a=>a.erros.length?'<li class="er"><b>'+esc(a.nome)+'</b>: '+esc(a.erros.join('; '))+'</li>':'<li class="ok">'+esc(a.nome)+'</li>').join('')+'</ul></div>';
+    r.A.map(a=>'<li class="'+(a.erros.length?'er':'ok')+'"><b>'+esc(a.nome)+'</b>: Presenças '+a.p+' · Ausências '+a.a+' · Sem aula (-) '+a.dash+' · Em branco '+a.blank+(a.erros.length?'<br>'+esc(a.erros.join('; ')):'')+'</li>').join('')+'</ul></div>';
   return h+'</div>';
 }
 async function run(files){
@@ -133,9 +168,9 @@ async function run(files){
   for(const f of files){
     const box=document.createElement('div');out.appendChild(box);
     try{
-      const items=await extract(f);
+      const {items,sigs}=await extract(f);
       if(!items.length)throw new Error('PDF sem texto (provavelmente digitalizado). Envie o PDF gerado direto da planilha.');
-      box.innerHTML=render(f.name,analyze(items));
+      box.innerHTML=render(f.name,analyze(items,sigs));
     }catch(e){box.innerHTML='<div class="card"><div class="hd"><h2>'+esc(f.name)+'</h2><span class="bg er">Não foi possível ler</span><p>'+esc(e.message)+'</p></div></div>'}
   }
 }
