@@ -1,207 +1,1087 @@
 <!doctype html>
-<html lang="pt-BR"><head><meta charset="utf-8">
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Conferência de listas de presença</title>
 <style>
-:root{--bg:#f3f6f7;--cd:#fff;--tx:#17262b;--mu:#5b6b72;--bd:#d6dfe2;--ac:#0f6e7a;--ok:#146c3b;--okb:#d9f2e3;--er:#a61b1b;--erb:#fbe0e0;--wa:#8a5a00;--wab:#fcefc7;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1719;--cd:#182326;--tx:#e6eef0;--mu:#93a5ab;--bd:#2b3a3f;--ac:#4cc3d1;--ok:#6fdc9c;--okb:#12341f;--er:#ff8d8d;--erb:#3a1717;--wa:#f5c451;--wab:#3a2d0b}}
-:root[data-theme="dark"]{--bg:#0f1719;--cd:#182326;--tx:#e6eef0;--mu:#93a5ab;--bd:#2b3a3f;--ac:#4cc3d1;--ok:#6fdc9c;--okb:#12341f;--er:#ff8d8d;--erb:#3a1717;--wa:#f5c451;--wab:#3a2d0b}
-*{box-sizing:border-box}html,body{margin:0}
-body{background:var(--bg);color:var(--tx);font:16px/1.5 Georgia,"Times New Roman",serif}
-main{max-width:760px;margin:0 auto;padding:20px 16px 48px}
+:root{
+  --bg:#f3f6f7;--cd:#fff;--tx:#17262b;--mu:#5b6b72;--bd:#d6dfe2;
+  --ac:#0f6e7a;--ok:#146c3b;--okb:#d9f2e3;--er:#a61b1b;--erb:#fbe0e0;
+  --wa:#8a5a00;--wab:#fcefc7;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --bg:#0f1719;--cd:#182326;--tx:#e6eef0;--mu:#93a5ab;--bd:#2b3a3f;
+    --ac:#4cc3d1;--ok:#6fdc9c;--okb:#12341f;--er:#ff8d8d;--erb:#3a1717;
+    --wa:#f5c451;--wab:#3a2d0b;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0f1719;--cd:#182326;--tx:#e6eef0;--mu:#93a5ab;--bd:#2b3a3f;
+  --ac:#4cc3d1;--ok:#6fdc9c;--okb:#12341f;--er:#ff8d8d;--erb:#3a1717;
+  --wa:#f5c451;--wab:#3a2d0b;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--bg);color:var(--tx);
+  font:16px/1.5 Georgia,"Times New Roman",serif;
+}
+main{max-width:900px;margin:0 auto;padding:20px 16px 48px}
 h1{font-size:1.6rem;line-height:1.2;margin:8px 0 6px}
 p.s{color:var(--mu);margin:0 0 18px;font-family:system-ui,sans-serif;font-size:.95rem}
-label.dz{display:block;border:2px dashed var(--ac);border-radius:10px;padding:26px 16px;text-align:center;cursor:pointer;background:var(--cd);font-family:system-ui,sans-serif}
+label.dz{
+  display:block;border:2px dashed var(--ac);border-radius:10px;padding:26px 16px;
+  text-align:center;cursor:pointer;background:var(--cd);font-family:system-ui,sans-serif;
+}
+label.dz:hover{background:color-mix(in srgb,var(--ac) 7%,var(--cd))}
 label.dz:focus-within{outline:3px solid var(--ac)}
 label.dz input{position:absolute;opacity:0;width:1px;height:1px}
 label.dz b{color:var(--ac)}
-.card{background:var(--cd);border:1px solid var(--bd);border-radius:10px;margin-top:16px;overflow:hidden;font-family:system-ui,sans-serif}
+.card{
+  background:var(--cd);border:1px solid var(--bd);border-radius:10px;
+  margin-top:16px;overflow:hidden;font-family:system-ui,sans-serif;
+}
 .hd{padding:14px 16px;border-bottom:1px solid var(--bd)}
-.hd h2{font:700 1rem Georgia,serif;margin:0 0 4px;word-break:break-word}
+.hd h2{font:700 1rem Georgia,serif;margin:0 0 8px;word-break:break-word}
 .bg{display:inline-block;padding:2px 10px;border-radius:99px;font-weight:700;font-size:.85rem}
-.ok{background:var(--okb);color:var(--ok)}.er{background:var(--erb);color:var(--er)}.wa{background:var(--wab);color:var(--wa)}
-dl{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;margin:10px 0 0;font-size:.9rem}dt{color:var(--mu)}dd{margin:0}
-.sec{padding:12px 16px;border-bottom:1px solid var(--bd)}.sec:last-child{border:0}
+.ok{background:var(--okb);color:var(--ok)}
+.er{background:var(--erb);color:var(--er)}
+.wa{background:var(--wab);color:var(--wa)}
+dl{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;margin:10px 0 0;font-size:.9rem}
+dt{color:var(--mu)}
+dd{margin:0}
+.sec{padding:12px 16px;border-bottom:1px solid var(--bd)}
+.sec:last-child{border:0}
 .sec h3{font-size:.95rem;margin:0 0 6px}
 ul{margin:0;padding:0;list-style:none}
-li{padding:3px 0 3px 26px;position:relative;font-size:.92rem}
+li{padding:4px 0 4px 26px;position:relative;font-size:.92rem}
 li:before{position:absolute;left:0;font-weight:700}
-li.ok:before{content:"✔";color:var(--ok)}li.er:before{content:"✘";color:var(--er)}li.wa:before{content:"!";color:var(--wa);left:6px}
+li.ok:before{content:"✔";color:var(--ok)}
+li.er:before{content:"✘";color:var(--er)}
+li.wa:before{content:"!";color:var(--wa);left:6px}
 li.ok,li.er,li.wa{background:none}
-</style></head><body><main>
-<h1>Conferência de listas de presença</h1>
-<p class="s">Envie o PDF ou a imagem (foto/print) da lista. Confere P/A nos dias da periodicidade e se instrutor e coordenador assinaram. A análise roda no seu navegador: nada é enviado nem salvo.</p>
-<label class="dz"><input id="f" type="file" accept="application/pdf,image/*" multiple><b>Escolher PDFs ou imagens</b> ou arrastar para cá</label>
-<div id="out"></div></main>
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px;font-family:system-ui,sans-serif}
+button{
+  border:1px solid var(--bd);background:var(--cd);color:var(--tx);
+  border-radius:8px;padding:8px 12px;cursor:pointer;font:inherit;
+}
+button:hover{border-color:var(--ac)}
+.small{font-size:.82rem;color:var(--mu)}
+.progress{margin-top:10px;height:6px;background:var(--bd);border-radius:99px;overflow:hidden}
+.progress>span{display:block;height:100%;width:0;background:var(--ac);transition:width .2s}
+@media(max-width:560px){
+  main{padding:16px 10px 36px}
+  dl{grid-template-columns:1fr}
+  dt{margin-top:5px}
+}
+</style>
+</head>
+<body>
+<main>
+  <h1>Conferência de listas de presença</h1>
+  <p class="s">
+    Envie o PDF ou a imagem (foto/print) da lista. O sistema confere P/A nos dias da
+    periodicidade e verifica as assinaturas digitais quando disponíveis. A análise
+    acontece no seu navegador: os arquivos não são enviados nem salvos por este sistema.
+  </p>
+
+  <label class="dz" for="f">
+    <input id="f" type="file" accept="application/pdf,image/*" multiple>
+    <b>Escolher PDFs ou imagens</b> ou arrastar para cá
+    <div class="small">PDF, PNG ou JPG</div>
+  </label>
+
+  <div id="out" aria-live="polite"></div>
+</main>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
-pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-const MES=['janeiro','fevereiro','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
-const DIA={domingo:0,segunda:1,terca:2,quarta:3,quinta:4,sexta:5,sabado:6};
-const NS=['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
-const BAD=/instrutor|coordenador|coord\.|assinad|verifique|documento|data:|gov|_{3}/i;
-const norm=s=>(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
-const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const dm=d=>String(d).padStart(2,'0');
-function der(b,p){const t=b[p];let l=b[p+1],h=2;
-  if(l===128){let q=p+2;while(!(b[q]===0&&b[q+1]===0))q=der(b,q).e;return{t,s:p+2,e:q+2,p,ind:1,ce:q}}
-  if(l&128){const n=l&127;l=0;for(let i=0;i<n;i++)l=l*256+b[p+2+i];h=2+n}
-  return{t,s:p+h,e:p+h+l,p}}
-function kids(b,n){const a=[],lim=n.ind?n.ce:n.e;let p=n.s;while(p<lim){const k=der(b,p);a.push(k);p=k.e}return a}
-function cnOf(b,name){for(const set of kids(b,name))for(const seq of kids(b,set)){const [o,v]=kids(b,seq);
-  if(o&&o.e-o.s===3&&b[o.s]===0x55&&b[o.s+1]===4&&b[o.s+2]===3)return new TextDecoder(v.t===0x1e?'utf-16be':v.t===0x0c?'utf-8':'latin1').decode(b.slice(v.s,v.e))}return ''}
-function signerName(hex){
-  const b=new Uint8Array(hex.match(/../g).map(h=>parseInt(h,16)));
-  const sd=kids(b,kids(b,kids(b,der(b,0))[1])[0]);
-  const cs=kids(b,sd.find(k=>k.t===0xA0)).map(c=>{const ch=kids(b,kids(b,c)[0]),o=ch[0].t===0xA0?1:0,key=n=>b.slice(n.p,n.e).join(',');
-    return{iss:key(ch[o+2]),sub:key(ch[o+4]),cn:cnOf(b,ch[o+4])}});
-  const leaf=cs.find(c=>!cs.some(x=>x!==c&&x.iss===c.sub))||cs[0];
-  return leaf?leaf.cn.replace(/:\s*\d+\s*$/,'').trim():'';
+'use strict';
+
+if (window.pdfjsLib) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 }
-function readSigs(buf){
-  const s=new TextDecoder('latin1').decode(buf),out=[],re=/\/Contents\s*<([0-9A-Fa-f]{200,})>/g;let m;
-  while((m=re.exec(s))){try{
-    const w=s.slice(Math.max(0,m.index-700),m.index+m[0].length+700),d=/\/M\s*\(D:(\d{4})(\d{2})(\d{2})/.exec(w),nome=signerName(m[1]);
-    if(nome&&!out.some(o=>norm(o.nome)===norm(nome)))out.push({nome,data:d?d[3]+'/'+d[2]+'/'+d[1]:''});
-  }catch(e){}}
+
+const MES = [
+  'janeiro','fevereiro','março','abril','maio','junho',
+  'julho','agosto','setembro','outubro','novembro','dezembro'
+];
+
+const DIA = {
+  domingo:0, segunda:1, terca:2, terça:2, quarta:3,
+  quinta:4, sexta:5, sabado:6, sábado:6
+};
+
+const NS = ['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
+
+const BAD = /instrutor|coordenador|coord\.|assinad|verifique|documento|data:|gov|_{3}/i;
+
+const norm = s => String(s || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g,'')
+  .toLowerCase()
+  .replace(/\s+/g,' ')
+  .trim();
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({
+  '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'
+}[c]));
+
+const dm = d => String(d).padStart(2,'0');
+
+function der(b, p) {
+  const t = b[p];
+  let l = b[p + 1];
+  let h = 2;
+
+  if (l === 128) {
+    let q = p + 2;
+    while (q + 1 < b.length && !(b[q] === 0 && b[q + 1] === 0)) {
+      const n = der(b, q);
+      if (!n || n.e <= q) throw new Error('Estrutura ASN.1 inválida.');
+      q = n.e;
+    }
+    return { t, s:p+2, e:q, p, ind:1, ce:q };
+  }
+
+  if (l & 128) {
+    const n = l & 127;
+    if (n === 0 || p + 2 + n > b.length) throw new Error('Tamanho ASN.1 inválido.');
+    l = 0;
+    for (let i = 0; i < n; i++) l = l * 256 + b[p + 2 + i];
+    h = 2 + n;
+  }
+
+  if (p + h + l > b.length) throw new Error('Objeto ASN.1 fora dos limites.');
+  return { t, s:p+h, e:p+h+l, p };
+}
+
+function kids(b, n) {
+  if (!n) return [];
+  const a = [];
+  const lim = n.ind ? n.ce : n.e;
+  let p = n.s;
+
+  while (p < lim) {
+    const k = der(b, p);
+    a.push(k);
+    p = k.e;
+  }
+  return a;
+}
+
+function cnOf(b, name) {
+  for (const set of kids(b, name)) {
+    for (const seq of kids(b, set)) {
+      const parts = kids(b, seq);
+      const o = parts[0], v = parts[1];
+      if (
+        o && v && o.e - o.s === 3 &&
+        b[o.s] === 0x55 && b[o.s+1] === 0x04 && b[o.s+2] === 0x03
+      ) {
+        let encoding = 'latin1';
+        if (v.t === 0x1e) encoding = 'utf-16be';
+        else if (v.t === 0x0c) encoding = 'utf-8';
+        return new TextDecoder(encoding).decode(b.slice(v.s, v.e));
+      }
+    }
+  }
+  return '';
+}
+
+function signerName(hex) {
+  try {
+    const clean = hex.replace(/[^0-9a-f]/gi,'');
+    const bytes = clean.match(/../g);
+    if (!bytes) return '';
+
+    const b = new Uint8Array(bytes.map(h => parseInt(h,16)));
+    const root = der(b,0);
+    const rootKids = kids(b,root);
+    if (!rootKids[1]) return '';
+
+    const signerSetContainer = kids(b,rootKids[1])[0];
+    if (!signerSetContainer) return '';
+
+    const signerEntries = kids(b,signerSetContainer);
+    const cs = [];
+
+    for (const c of signerEntries) {
+      const cKidsContainer = kids(b,c)[0];
+      if (!cKidsContainer) continue;
+
+      const ch = kids(b,cKidsContainer);
+      const o = ch[0] && ch[0].t === 0xA0 ? 1 : 0;
+
+      if (!ch[o+2] || !ch[o+4]) continue;
+
+      const key = n => Array.from(b.slice(n.p,n.e)).join(',');
+      cs.push({
+        iss:key(ch[o+2]),
+        sub:key(ch[o+4]),
+        cn:cnOf(b,ch[o+4])
+      });
+    }
+
+    const leaf = cs.find(c => !cs.some(x => x !== c && x.iss === c.sub)) || cs[0];
+    return leaf ? leaf.cn.replace(/:\s*\*\d+\s*$/,'').trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function readSigs(buf) {
+  const s = new TextDecoder('latin1').decode(buf);
+  const out = [];
+  const re = /\/Contents\s*<([0-9A-Fa-f]{200,})>/g;
+  let m;
+
+  while ((m = re.exec(s))) {
+    try {
+      const w = s.slice(
+        Math.max(0,m.index-1200),
+        Math.min(s.length,m.index+m[0].length+1200)
+      );
+      const d = /\/M\s*\(D:(\d{4})(\d{2})(\d{2})/.exec(w);
+      const nome = signerName(m[1]);
+
+      if (nome && !out.some(o => norm(o.nome) === norm(nome))) {
+        out.push({
+          nome,
+          data:d ? `${d[3]}/${d[2]}/${d[1]}` : ''
+        });
+      }
+    } catch {}
+  }
+
   return out;
 }
-const loadJs=u=>new Promise((ok,no)=>{const e=document.createElement('script');e.src=u;e.onload=ok;e.onerror=()=>no(new Error('Não foi possível carregar o leitor de imagens (OCR). Verifique a internet.'));document.head.appendChild(e)});
-async function ocrItems(cv){
-  if(!window.Tesseract)await loadJs('https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/6.0.0/tesseract.min.js');
-  const w=await Tesseract.createWorker('por');
-  let data;try{data=(await w.recognize(cv,{},{blocks:true})).data}finally{await w.terminate()}
-  const ws=data.words||(data.blocks||[]).flatMap(b=>b.paragraphs.flatMap(p=>p.lines.flatMap(l=>l.words)));
-  const W=cv.width,H=cv.height,k=(W>H?842:595)/W;
-  return ws.filter(x=>x.text&&x.text.trim()).map(x=>({s:x.text.trim(),x:x.bbox.x0*k,y:(H-x.bbox.y1)*k,w:(x.bbox.x1-x.bbox.x0)*k}));
-}
-async function extract(file){
-  const buf=await file.arrayBuffer();
-  if(/^image\//.test(file.type)){
-    const bm=await createImageBitmap(file),k=2200/bm.width,cv=document.createElement('canvas');
-    cv.width=2200;cv.height=Math.round(bm.height*k);cv.getContext('2d').drawImage(bm,0,0,cv.width,cv.height);
-    return{items:await ocrItems(cv),sigs:null,ocr:1,img:1};
+
+const loadJs = u => new Promise((ok,no) => {
+  const e = document.createElement('script');
+  e.src = u;
+  e.onload = ok;
+  e.onerror = () => no(new Error(
+    'Não foi possível carregar o leitor de imagens (OCR). Verifique sua conexão com a internet.'
+  ));
+  document.head.appendChild(e);
+});
+
+async function ocrItems(cv) {
+  if (!window.Tesseract) {
+    await loadJs(
+      'https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/6.0.0/tesseract.min.js'
+    );
   }
-  const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise,pg=await pdf.getPage(1);
-  const tc=await pg.getTextContent();
-  const items=tc.items.map(i=>({s:i.str.trim(),x:i.transform[4],y:i.transform[5],w:i.width})).filter(i=>i.s);
-  const sigs=readSigs(buf);
-  if(items.length>=40)return{items,sigs};
-  const vp=pg.getViewport({scale:2.6}),cv=document.createElement('canvas');cv.width=vp.width;cv.height=vp.height;
-  await pg.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
-  return{items:await ocrItems(cv),sigs,ocr:1};
+
+  const w = await Tesseract.createWorker('por');
+  let data;
+
+  try {
+    const result = await w.recognize(cv, {}, { blocks:true });
+    data = result.data;
+  } finally {
+    await w.terminate();
+  }
+
+  const ws = data.words ||
+    (data.blocks || []).flatMap(b =>
+      (b.paragraphs || []).flatMap(p =>
+        (p.lines || []).flatMap(l => l.words || [])
+      )
+    );
+
+  const W = cv.width;
+  const H = cv.height;
+  const k = (W > H ? 842 : 595) / W;
+
+  return ws
+    .filter(x => x.text && x.text.trim())
+    .map(x => ({
+      s:x.text.trim(),
+      x:x.bbox.x0*k,
+      y:(H-x.bbox.y1)*k,
+      w:(x.bbox.x1-x.bbox.x0)*k
+    }));
 }
-function val(items,re,multi,cut){
-  const l=items.filter(i=>re.test(i.s)).sort((a,b)=>b.y-a.y)[0];if(!l)return '';
-  const m=re.exec(l.s);if(m[1])return m[1].trim();
-  const bl=items.filter(i=>i!==l&&(/^(n[uú]cleo|turma|modalidade|professor|coordenador|auxiliar):$/i.test(i.s)||/^(periodicidade|hor[aá]rio):?$/i.test(i.s))&&i.x>l.x+l.w&&Math.abs(i.y-l.y)<6).map(i=>i.x);
-  const lim=Math.min(cut||1e9,...bl),x0=l.x+l.w-2;
-  const n=items.filter(i=>i!==l&&i.x>x0&&i.x<lim&&!/^20\d\d$/.test(i.s)&&Math.abs(i.y-l.y)<(multi?10:9));
-  if(multi)return n.sort((a,b)=>b.y-a.y||a.x-b.x).map(i=>i.s).join(' ');
-  n.sort((a,b)=>Math.abs(a.y-l.y)-Math.abs(b.y-l.y)||a.x-b.x);if(!n[0])return '';const dy=Math.abs(n[0].y-l.y);return n.filter(i=>Math.abs(Math.abs(i.y-l.y)-dy)<3).sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ');
+
+async function imageToCanvas(file) {
+  if ('createImageBitmap' in window) {
+    const bm = await createImageBitmap(file);
+    const k = Math.min(1, 2200 / bm.width);
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1, Math.round(bm.width*k));
+    cv.height = Math.max(1, Math.round(bm.height*k));
+    cv.getContext('2d',{willReadFrequently:true}).drawImage(
+      bm,0,0,cv.width,cv.height
+    );
+    if (bm.close) bm.close();
+    return cv;
+  }
+
+  const url = URL.createObjectURL(file);
+  try {
+    const img = new Image();
+    await new Promise((resolve,reject) => {
+      img.onload = resolve;
+      img.onerror = () => reject(new Error('Não foi possível abrir a imagem.'));
+      img.src = url;
+    });
+
+    const k = Math.min(1,2200/img.naturalWidth);
+    const cv = document.createElement('canvas');
+    cv.width = Math.max(1,Math.round(img.naturalWidth*k));
+    cv.height = Math.max(1,Math.round(img.naturalHeight*k));
+    cv.getContext('2d',{willReadFrequently:true}).drawImage(
+      img,0,0,cv.width,cv.height
+    );
+    return cv;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
-function analyze(items,dsig,ocr,img){
-  const C=[],A=[],I={};
-  const add=(t,m)=>C.push({t,m});
-  if(ocr)add('wa','Leitura por imagem (OCR): resultado aproximado. Confira cada apontamento no original.');
-  const mItem=items.find(i=>MES.indexOf(norm(i.s))>=0);const mi=mItem?MES.indexOf(norm(mItem.s)):undefined;
-  const ano=+((items.find(i=>/^20\d\d$/.test(i.s))||{}).s);
-  const CUT=mItem?mItem.x:1e9;I.Núcleo=val(items,/^n[uú]cleo:\s*(.*)$/i,0,CUT);I.Turma=val(items,/^turma:\s*(.*)$/i,0,CUT);
-  const prof=val(items,/^professor:\s*(.*)$/i,0,CUT),coord=val(items,/^coordenador:\s*(.*)$/i,0,CUT);
-  I.Professor=prof;I.Coordenador=coord;I.Horário=val(items,/^hor[aá]rio:?\s*(.*)$/i,0,CUT);
-  const per=val(items,/^periodicidade:?\s*(.*)$/i,true,CUT);I.Periodicidade=per;
-  if(mi==null||!ano)return{C:[{t:'er',m:'Não encontrei o mês/ano de referência na lista.'}],I,A};
-  I.Mês=MES[mi]+'/'+ano;
-  const dias=Object.keys(DIA).filter(k=>norm(per).replace(/\s/g,'').includes(k)).map(k=>DIA[k]);
-  const q=/(\d+)\s*vez/.exec(norm(per));
-  if(!dias.length)return{C:[{t:'er',m:'Não consegui ler os dias da semana na periodicidade ("'+per+'").'}],I,A};
-  if(q&&+q[1]!==dias.length)add('er','Periodicidade inconsistente: informa '+(+q[1])+' vez(es) por semana, mas lista '+dias.length+' dia(s).');
-  else add('ok','Periodicidade: '+dias.map(d=>NS[d]).join(' e '));
-  const dim=new Date(ano,mi+1,0).getDate();
-  const aula=[];for(let d=1;d<=dim;d++)if(dias.includes(new Date(ano,mi,d).getDay()))aula.push(d);
-  add('ok','Dias de aula em '+I.Mês+': '+aula.join(', ')+' ('+aula.length+' aulas)');
-  // assinaturas
-  const ts=items.filter(i=>/^data:\s*\d{2}\/\d{2}\/\d{4}/i.test(i.s)).map(d=>{
-    const n=items.filter(i=>Math.abs(i.x-d.x)<14&&i.y>d.y+3&&i.y<d.y+26&&!/documento|assinad|data:|verifique/i.test(i.s)).sort((a,b)=>a.y-b.y)[0];
-    return{nome:n?n.s:'?',data:d.s.slice(6,16)};
+
+async function extract(file) {
+  const buf = await file.arrayBuffer();
+
+  if (/^image\//i.test(file.type)) {
+    const cv = await imageToCanvas(file);
+    return {
+      items:await ocrItems(cv),
+      sigs:null,
+      ocr:1,
+      img:1
+    };
+  }
+
+  if (!window.pdfjsLib) {
+    throw new Error('O leitor de PDF não foi carregado. Verifique a conexão com a internet.');
+  }
+
+  const pdf = await pdfjsLib.getDocument({
+    data:buf.slice(0)
+  }).promise;
+
+  if (!pdf.numPages) throw new Error('O PDF não contém páginas.');
+
+  /*
+   * A lista pode ocupar mais de uma página. O código original lia apenas
+   * a primeira. Agora reunimos o texto de todas as páginas e usamos OCR
+   * página a página apenas quando necessário.
+   */
+  const allItems = [];
+  const sigs = readSigs(buf);
+  let usedOcr = false;
+
+  for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+    const pg = await pdf.getPage(pageNo);
+    const tc = await pg.getTextContent();
+
+    const pageItems = tc.items
+      .map(i => ({
+        s:String(i.str || '').trim(),
+        x:i.transform[4],
+        y:i.transform[5],
+        w:i.width || 0,
+        page:pageNo
+      }))
+      .filter(i => i.s);
+
+    /*
+     * Se a página não tiver texto suficiente, renderizamos e aplicamos OCR.
+     * A coordenada Y do PDF e do OCR é normalizada para um espaço semelhante.
+     */
+    if (pageItems.length >= 12) {
+      allItems.push(...pageItems);
+    } else {
+      const vp = pg.getViewport({scale:2.6});
+      const cv = document.createElement('canvas');
+      cv.width = Math.ceil(vp.width);
+      cv.height = Math.ceil(vp.height);
+
+      await pg.render({
+        canvasContext:cv.getContext('2d',{willReadFrequently:true}),
+        viewport:vp
+      }).promise;
+
+      const ocr = await ocrItems(cv);
+      ocr.forEach(i => i.page = pageNo);
+      allItems.push(...ocr);
+      usedOcr = true;
+    }
+  }
+
+  return {
+    items:allItems,
+    sigs,
+    ocr:usedOcr ? 1 : 0,
+    img:0
+  };
+}
+
+function val(items,re,multi,cut) {
+  const candidates = items.filter(i => re.test(i.s)).sort((a,b) => b.y-a.y);
+  const l = candidates[0];
+
+  if (!l) return '';
+
+  const m = l.s.match(re);
+  if (m && m[1]) return m[1].trim();
+
+  const bl = items
+    .filter(i =>
+      i !== l &&
+      (
+        /^(núcleo|nucleo|turma|modalidade|professor|coordenador|auxiliar):?$/i.test(i.s) ||
+        /^(periodicidade|horário|horario):?$/i.test(i.s)
+      ) &&
+      i.x > l.x + l.w &&
+      Math.abs(i.y-l.y) < 10
+    )
+    .map(i => i.x);
+
+  const lim = Math.min(cut ?? 1e9,...bl);
+  const x0 = l.x + l.w - 2;
+
+  const n = items.filter(i =>
+    i !== l &&
+    i.x > x0 &&
+    i.x < lim &&
+    !/^20\d\d$/.test(i.s) &&
+    Math.abs(i.y-l.y) < (multi ? 12 : 10)
+  );
+
+  if (multi) {
+    return n
+      .sort((a,b) => b.y-a.y || a.x-b.x)
+      .map(i => i.s)
+      .join(' ');
+  }
+
+  n.sort((a,b) =>
+    Math.abs(a.y-l.y)-Math.abs(b.y-l.y) || a.x-b.x
+  );
+
+  if (!n[0]) return '';
+
+  const dy = Math.abs(n[0].y-l.y);
+
+  return n
+    .filter(i => Math.abs(Math.abs(i.y-l.y)-dy) < 3)
+    .sort((a,b) => a.x-b.x)
+    .map(i => i.s)
+    .join(' ');
+}
+
+function parseReference(items) {
+  const monthMap = Object.fromEntries(
+    MES.map((m,i) => [norm(m),i])
+  );
+
+  let mItem = items.find(i => monthMap[norm(i.s)] !== undefined);
+
+  /*
+   * Também aceita "mês: agosto", "agosto/2026" e "08/2026".
+   */
+  let mi = mItem ? monthMap[norm(mItem.s)] : null;
+
+  if (mi == null) {
+    const joined = items.map(i => i.s).join(' ');
+    const mm = joined.match(
+      /\b(janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\b/i
+    );
+    if (mm) mi = monthMap[norm(mm[1])];
+    else {
+      const numeric = joined.match(/\b(0?[1-9]|1[0-2])\s*[\/-]\s*(20\d{2})\b/);
+      if (numeric) mi = Number(numeric[1])-1;
+    }
+  }
+
+  let ano;
+  const years = items
+    .map(i => i.s.match(/\b(20\d{2})\b/))
+    .filter(Boolean)
+    .map(m => Number(m[1]));
+
+  if (years.length) {
+    ano = years.sort((a,b) => years.filter(x => x===b).length - years.filter(x => x===a).length)[0];
+  }
+
+  return {mi,ano};
+}
+
+function extractPeriodDays(per) {
+  const text = norm(per).replace(/\bvezes?\b/g,' vez');
+  const days = [];
+
+  for (const [name,num] of Object.entries(DIA)) {
+    if (new RegExp(`\\b${name}\\b`).test(text)) {
+      if (!days.includes(num)) days.push(num);
+    }
+  }
+
+  days.sort((a,b) => a-b);
+
+  const q = text.match(/(\d+)\s*vez(?:es)?/);
+
+  return {days,frequency:q ? Number(q[1]) : null};
+}
+
+function detectHeaderDays(items) {
+  const groups = new Map();
+
+  for (const i of items) {
+    if (!/^\d{1,2}$/.test(i.s)) continue;
+    const d = Number(i.s);
+    if (d < 1 || d > 31) continue;
+
+    const key = Math.round(i.y/3);
+    if (!groups.has(key)) groups.set(key,[]);
+    groups.get(key).push(i);
+  }
+
+  const candidates = [...groups.values()]
+    .sort((a,b) => {
+      const sa = new Set(a.map(i => i.s)).size;
+      const sb = new Set(b.map(i => i.s)).size;
+      return sb-sa;
+    });
+
+  return candidates[0] || [];
+}
+
+function rowItems(items, y) {
+  return items
+    .filter(i => Math.abs(i.y-y) < 4)
+    .sort((a,b) => a.x-b.x);
+}
+
+function analyze(items,dsig,ocr,img) {
+  const C = [];
+  const A = [];
+  const I = {};
+
+  const add = (t,m) => C.push({t,m});
+
+  if (ocr) {
+    add('wa','Leitura por OCR: o resultado é aproximado. Confira os apontamentos no arquivo original.');
+  }
+
+  const {mi,ano} = parseReference(items);
+  const monthItem = items.find(i => MES.some(m => norm(m) === norm(i.s)));
+  const CUT = monthItem ? monthItem.x : 1e9;
+
+  I['Núcleo'] = val(items,/^(?:núcleo|nucleo):\s*(.*)$/i,0,CUT);
+  I['Turma'] = val(items,/^turma:\s*(.*)$/i,0,CUT);
+  const prof = val(items,/^professor:\s*(.*)$/i,0,CUT);
+  const coord = val(items,/^coordenador:\s*(.*)$/i,0,CUT);
+
+  I['Professor'] = prof;
+  I['Coordenador'] = coord;
+  I['Horário'] = val(items,/^hor(?:ário|ario):?\s*(.*)$/i,0,CUT);
+  I['Periodicidade'] = val(items,/^periodicidade:?\s*(.*)$/i,1,CUT);
+
+  if (mi == null || !ano) {
+    return {
+      C:[{t:'er',m:'Não encontrei o mês/ano de referência na lista.'}],
+      I,A
+    };
+  }
+
+  I['Mês'] = `${MES[mi]}/${ano}`;
+
+  const {days:dias,frequency} = extractPeriodDays(I['Periodicidade'] || '');
+
+  if (!dias.length) {
+    return {
+      C:[{
+        t:'er',
+        m:`Não consegui ler os dias da semana na periodicidade ("${I['Periodicidade'] || 'não lida'}").`
+      }],
+      I,A
+    };
+  }
+
+  if (frequency != null && frequency !== dias.length) {
+    add(
+      'er',
+      `Periodicidade inconsistente: informa ${frequency} vez(es) por semana, mas a lista contém ${dias.length} dia(s).`
+    );
+  } else {
+    add('ok',`Periodicidade: ${dias.map(d => NS[d]).join(' e ')}`);
+  }
+
+  const dim = new Date(ano,mi+1,0).getDate();
+  const aula = [];
+
+  for (let d=1; d<=dim; d++) {
+    if (dias.includes(new Date(ano,mi,d).getDay())) aula.push(d);
+  }
+
+  add(
+    'ok',
+    `Dias de aula em ${I['Mês']}: ${aula.join(', ')} (${aula.length} aulas)`
+  );
+
+  /* Assinaturas */
+  const ts = items
+    .filter(i => /^data:\s*\d{2}\/\d{2}\/\d{4}/i.test(i.s))
+    .map(d => {
+      const n = items
+        .filter(i =>
+          Math.abs(i.x-d.x) < 18 &&
+          i.y > d.y+3 &&
+          i.y < d.y+32 &&
+          !/documento|assinad|data:|verifique/i.test(i.s)
+        )
+        .sort((a,b) => a.y-b.y)[0];
+
+      return {
+        nome:n ? n.s : '?',
+        data:d.s.slice(6,16)
+      };
+    })
+    .filter(x => x.nome !== '?');
+
+  const sig = dsig && dsig.length ? dsig : ts;
+
+  if (img) {
+    add(
+      'wa',
+      'Arquivo em imagem: assinaturas digitais não podem ser verificadas com segurança. Confira instrutor e coordenador no original.'
+    );
+  } else if (!sig.length) {
+    add('wa','Nenhuma assinatura digital (gov.br) identificável foi encontrada no PDF.');
+  } else {
+    add(
+      'ok',
+      `Assinaturas digitais encontradas (${sig.length}): ` +
+      sig.map(x => x.nome + (x.data ? ` em ${x.data}` : '')).join('; ')
+    );
+
+    const has = n => sig.some(s => {
+      const a = norm(s.nome);
+      const b = norm(n);
+      return b && (a === b || a.includes(b) || b.includes(a));
+    });
+
+    [['Instrutor',prof],['Coordenador',coord]].forEach(([r,n]) => {
+      if (!n) {
+        add('wa',`${r} não foi lido no cabeçalho.`);
+      } else if (has(n)) {
+        add('ok',`${r} assinou: ${n}`);
+      } else {
+        add(
+          'er',
+          `${r} do cabeçalho (${n}) não consta entre os signatários identificados.`
+        );
+      }
+    });
+
+    const out = sig.filter(s =>
+      ![prof,coord].some(n =>
+        n &&
+        (
+          norm(s.nome).includes(norm(n)) ||
+          norm(n).includes(norm(s.nome))
+        )
+      )
+    );
+
+    if (out.length) {
+      add(
+        'wa',
+        'Outros signatários não conferidos: ' +
+        out.map(s => s.nome + (s.data ? ` em ${s.data}` : '')).join('; ')
+      );
+    }
+  }
+
+  /* Grade de presença */
+  const hdr = detectHeaderDays(items);
+
+  if (!hdr.length || new Set(hdr.map(i => i.s)).size < (ocr ? 10 : 18)) {
+    add(
+      'er',
+      'Não encontrei uma linha de cabeçalho com os dias do mês. Verifique se a tabela está legível.'
+    );
+    return {C,I,A};
+  }
+
+  const cx = {};
+  hdr.forEach(i => {
+    const d = Number(i.s);
+    if (!cx[d]) cx[d] = i.x + i.w/2;
   });
-  const sig=dsig&&dsig.length?dsig:ts;
-  if(img)add('wa','Arquivo em imagem: não dá para verificar as assinaturas digitais. Confira instrutor e coordenador no original.');
-  else if(!sig.length)add('er','Nenhuma assinatura digital (gov.br) encontrada.');
-  else{
-    add('ok','Assinaturas digitais encontradas ('+sig.length+'): '+sig.map(x=>x.nome+(x.data?' em '+x.data:'')).join('; '));
-    const has=n=>sig.some(s=>{const a=norm(s.nome),b=norm(n);return b&&(a===b||a.includes(b)||b.includes(a))});
-    [['Instrutor',prof],['Coordenador',coord]].forEach(([r,n])=>has(n)?add('ok',r+' assinou: '+n):add('er',r+' do cabeçalho ('+(n||'não lido')+') não consta entre os signatários.'));
-    const out=sig.filter(s=>![prof,coord].some(n=>n&&(norm(s.nome).includes(norm(n))||norm(n).includes(norm(s.nome)))));
-    if(out.length)add('wa','Outros signatários (não conferidos): '+out.map(s=>s.nome+' em '+s.data).join('; '));
+
+  const ds = Object.keys(cx).map(Number).sort((a,b) => a-b);
+
+  if (ds.length < 2) {
+    add('er','Não foi possível determinar a posição das colunas dos dias.');
+    return {C,I,A};
   }
-  // grade de dias
-  const g={};items.forEach(i=>{if(/^\d{1,2}$/.test(i.s)&&+i.s>=1&&+i.s<=31)(g[Math.round(i.y/3)]=g[Math.round(i.y/3)]||[]).push(i)});
-  const hdr=Object.values(g).sort((a,b)=>new Set(b.map(i=>i.s)).size-new Set(a.map(i=>i.s)).size)[0];
-  if(!hdr||new Set(hdr.map(i=>i.s)).size<(ocr?18:28)){add('er','Não encontrei a linha dos dias do mês.');return{C,I,A};}
-  const cx={};hdr.forEach(i=>cx[+i.s]=i.x+i.w/2);
-  if(ocr){const P=Object.entries(cx).map(([d,x])=>[+d,x]),n=P.length,sx=P.reduce((a,q)=>a+q[0],0),sy=P.reduce((a,q)=>a+q[1],0),sxx=P.reduce((a,q)=>a+q[0]*q[0],0),sxy=P.reduce((a,q)=>a+q[0]*q[1],0),bb=(n*sxy-sx*sy)/(n*sxx-sx*sx),a0=(sy-bb*sx)/n;for(let d=1;d<=31;d++)cx[d]=a0+bb*d}
-  const ds=Object.keys(cx).map(Number),mn=Math.min(...ds),mx=Math.max(...ds),sp=(cx[mx]-cx[mn])/(mx-mn);
-  const L=cx[mn]-sp*.6,R=cx[mx]+sp*.6,hy=hdr[0].y;
-  const body=items.filter(i=>i.y<hy-3).sort((a,b)=>b.y-a.y),rows=[];
-  body.forEach(i=>{const r=rows[rows.length-1];if(r&&Math.abs(r.y-i.y)<3.5)r.it.push(i);else rows.push({y:i.y,it:[i]})});
-  rows.forEach(r=>{
-    const nome=r.it.filter(i=>i.x<L&&!/^\d+$/.test(i.s)&&/[a-zà-ÿ]/.test(i.s)&&!BAD.test(i.s)).sort((a,b)=>a.x-b.x).map(i=>i.s.replace(/^\d+\s*/,'')).join(' ').trim();
-    if(!nome)return;
-    const mk={},inv=[],erros=[];
-    r.it.forEach(i=>{const c=i.x+i.w/2;if(c<L||c>R)return;
-      let d=ds.reduce((a,b)=>Math.abs(cx[b]-c)<Math.abs(cx[a]-c)?b:a);
-      if(Math.abs(cx[d]-c)>sp*.6)return;
-      const t=i.s.toUpperCase().replace(/^[_—–]$/,'-');if(/^[PA]$/.test(t))mk[d]=t;else if(/^[-–—]$/.test(t))mk[d]='-';else if(!ocr)inv.push(dm(d)+' ("'+i.s+'")')});
-    const falta=aula.filter(d=>!mk[d]).map(dm),fora=Object.keys(mk).map(Number).filter(d=>!aula.includes(d)&&mk[d]!=='-').map(d=>dm(d)+' ('+mk[d]+')');
-    if(!Object.keys(mk).length)erros.push('sem nenhum registro no mês');
-    else{if(falta.length)erros.push('dia(s) de aula sem P/A: '+falta.join(', '));}
-    if(fora.length)erros.push('marcação em dia sem aula: '+fora.join(', '));
-    if(inv.length)erros.push('caractere inválido (use P ou A): '+inv.join(', '));
-    const nums=r.it.filter(i=>i.x+i.w/2>R&&/^\d+$/.test(i.s)).sort((a,b)=>a.x-b.x).map(i=>+i.s);
-    const cA=Object.values(mk).filter(v=>v==='A').length,cP=Object.values(mk).filter(v=>v==='P').length;
-    if(nums.length>=2&&(nums[0]!==cA||nums[1]!==cP))erros.push('totais impressos (A '+nums[0]+' / P '+nums[1]+') diferem do contado (A '+cA+' / P '+cP+')');
-    if(!Object.keys(mk).length&&!/\s/.test(nome))return;
-    A.push({nome,erros,p:cP,a:cA,dash:Object.values(mk).filter(v=>v==='-').length,blank:falta.length,mk});
+
+  if (ocr) {
+    const P = ds.map(d => [d,cx[d]]);
+    const n = P.length;
+    const sx = P.reduce((a,q) => a+q[0],0);
+    const sy = P.reduce((a,q) => a+q[1],0);
+    const sxx = P.reduce((a,q) => a+q[0]*q[0],0);
+    const sxy = P.reduce((a,q) => a+q[0]*q[1],0);
+    const den = n*sxx-sx*sx;
+
+    if (den !== 0) {
+      const bb = (n*sxy-sx*sy)/den;
+      const a0 = (sy-bb*sx)/n;
+      for (let d=1; d<=dim; d++) cx[d] = a0+bb*d;
+    }
+  }
+
+  const allDays = Object.keys(cx).map(Number).sort((a,b) => a-b);
+  const mn = Math.min(...allDays);
+  const mx = Math.max(...allDays);
+  const spanDays = Math.max(1,mx-mn);
+  const sp = Math.abs(cx[mx]-cx[mn])/spanDays;
+
+  if (!Number.isFinite(sp) || sp <= 0) {
+    add('er','Não foi possível determinar o espaçamento das colunas de presença.');
+    return {C,I,A};
+  }
+
+  const L = cx[mn]-sp*0.65;
+  const R = cx[mx]+sp*0.65;
+  const hy = Math.max(...hdr.map(i => i.y));
+
+  /*
+   * Importante: em PDF.js o eixo Y cresce de baixo para cima. Em OCR
+   * também normalizamos para o mesmo sentido. Assim, linhas abaixo do
+   * cabeçalho têm Y menor.
+   */
+  const body = items
+    .filter(i => i.y < hy-3)
+    .sort((a,b) => b.y-a.y);
+
+  const rows = [];
+
+  body.forEach(i => {
+    const r = rows[rows.length-1];
+
+    if (r && Math.abs(r.y-i.y) < 4) {
+      r.it.push(i);
+    } else {
+      rows.push({y:i.y,it:[i]});
+    }
   });
-  if(!A.length)add('er','Não encontrei alunos na lista.');
-  else{
-    const dsh=aula.filter(d=>A.some(x=>x.mk[d]==='-')),bln=aula.filter(d=>A.some(x=>!x.mk[d])),mis=dsh.filter(d=>A.some(x=>x.mk[d]&&x.mk[d]!=='-')),lst=a=>a.length?' ('+a.map(dm).join(', ')+')':'';
-    add('ok','Dias previstos marcados com "-" (sem aula): '+dsh.length+lst(dsh));
-    add(bln.length?'er':'ok','Dias previstos em branco: '+bln.length+lst(bln));
-    if(mis.length)add('wa','Dia(s) com "-" para alguns alunos e P/A para outros: '+mis.map(dm).join(', '));
+
+  rows.forEach(r => {
+    const nome = r.it
+      .filter(i =>
+        i.x < L &&
+        !/^\d+$/.test(i.s) &&
+        /[A-Za-zÀ-ÿ]/.test(i.s) &&
+        !BAD.test(i.s)
+      )
+      .sort((a,b) => a.x-b.x)
+      .map(i => i.s.replace(/^\d+\s*[-–—]?\s*/,''))
+      .join(' ')
+      .trim();
+
+    if (!nome) return;
+
+    const mk = {};
+    const inv = [];
+    const erros = [];
+
+    r.it.forEach(i => {
+      const c = i.x + i.w/2;
+
+      if (c < L || c > R) return;
+
+      let d = allDays.reduce((a,b) =>
+        Math.abs(cx[b]-c) < Math.abs(cx[a]-c) ? b : a
+      );
+
+      if (Math.abs(cx[d]-c) > sp*0.6) return;
+
+      const t = i.s.toUpperCase().trim();
+
+      if (/^[PA]$/.test(t)) {
+        mk[d] = t;
+      } else if (/^[-–—_]$/.test(t)) {
+        mk[d] = '-';
+      } else if (!ocr && t.length <= 3 && /[A-Z]/.test(t)) {
+        inv.push(`${dm(d)} ("${i.s}")`);
+      }
+    });
+
+    const falta = aula
+      .filter(d => !mk[d])
+      .map(dm);
+
+    const fora = Object.keys(mk)
+      .map(Number)
+      .filter(d => !aula.includes(d) && mk[d] !== '-')
+      .map(d => `${dm(d)} (${mk[d]})`);
+
+    if (!Object.keys(mk).length) {
+      erros.push('sem nenhum registro de presença identificado');
+    } else if (falta.length) {
+      erros.push('dia(s) de aula sem P/A: ' + falta.join(', '));
+    }
+
+    if (fora.length) {
+      erros.push('marcação em dia sem aula: ' + fora.join(', '));
+    }
+
+    if (inv.length) {
+      erros.push('caractere inválido (use P ou A): ' + inv.join(', '));
+    }
+
+    const nums = r.it
+      .filter(i =>
+        i.x+i.w/2 > R &&
+        /^\d+$/.test(i.s)
+      )
+      .sort((a,b) => a.x-b.x)
+      .map(i => Number(i.s));
+
+    const cA = Object.values(mk).filter(v => v === 'A').length;
+    const cP = Object.values(mk).filter(v => v === 'P').length;
+
+    if (
+      nums.length >= 2 &&
+      (nums[0] !== cA || nums[1] !== cP)
+    ) {
+      erros.push(
+        `totais impressos (A ${nums[0]} / P ${nums[1]}) diferem do contado (A ${cA} / P ${cP})`
+      );
+    }
+
+    if (!Object.keys(mk).length) return;
+
+    A.push({
+      nome,
+      erros,
+      p:cP,
+      a:cA,
+      dash:Object.values(mk).filter(v => v === '-').length,
+      blank:falta.length,
+      mk
+    });
+  });
+
+  if (!A.length) {
+    add('er','Não encontrei alunos/registros de presença na grade.');
+  } else {
+    /*
+     * "Dias previstos em branco" só deve considerar ausência de P/A.
+     * Um "-" em toda a lista é tratado como dia sem aula.
+     */
+    const dsh = aula.filter(d =>
+      A.every(x => x.mk[d] === '-')
+    );
+
+    const bln = aula.filter(d =>
+      A.some(x => !x.mk[d])
+    );
+
+    const mis = aula.filter(d =>
+      A.some(x => x.mk[d] === '-') &&
+      A.some(x => x.mk[d] === 'P' || x.mk[d] === 'A')
+    );
+
+    const lst = a => a.length
+      ? ' (' + a.map(dm).join(', ') + ')'
+      : '';
+
+    add(
+      'ok',
+      'Dias previstos marcados com "-" para todos: ' +
+      dsh.length + lst(dsh)
+    );
+
+    add(
+      bln.length ? 'er' : 'ok',
+      'Dias previstos em branco: ' +
+      bln.length + lst(bln)
+    );
+
+    if (mis.length) {
+      add(
+        'wa',
+        'Dia(s) com "-" para alguns alunos e P/A para outros: ' +
+        mis.map(dm).join(', ')
+      );
+    }
   }
-  return{C,I,A};
+
+  return {C,I,A};
 }
-function render(name,r){
-  const bad=r.C.some(c=>c.t==='er')||r.A.some(a=>a.erros.length);
-  const warn=r.C.some(c=>c.t==='wa');
-  const st=bad?['er','Com erros']:warn?['wa','Correta, com avisos']:['ok','Correta'];
-  const nErr=r.A.filter(a=>a.erros.length).length;
-  let h='<div class="card"><div class="hd"><h2>'+esc(name)+'</h2><span class="bg '+st[0]+'">'+st[1]+'</span><dl>'+
-    Object.entries(r.I).filter(([,v])=>v).map(([k,v])=>'<dt>'+k+'</dt><dd>'+esc(v)+'</dd>').join('')+'</dl></div>';
-  h+='<div class="sec"><h3>Resumo da lista</h3><ul>'+r.C.map(c=>'<li class="'+c.t+'">'+esc(c.m)+'</li>').join('')+'</ul></div>';
-  if(r.A.length)h+='<div class="sec"><h3>Alunos ('+r.A.length+' lidos, '+nErr+' com problema)</h3><ul>'+
-    r.A.map(a=>'<li class="'+(a.erros.length?'er':'ok')+'"><b>'+esc(a.nome)+'</b>: Presenças '+a.p+' · Ausências '+a.a+' · Sem aula (-) '+a.dash+' · Em branco '+a.blank+(a.erros.length?'<br>'+esc(a.erros.join('; ')):'')+'</li>').join('')+'</ul></div>';
-  return h+'</div>';
+
+function render(name,r) {
+  const bad =
+    r.C.some(c => c.t === 'er') ||
+    r.A.some(a => a.erros.length);
+
+  const warn = r.C.some(c => c.t === 'wa');
+
+  const st = bad
+    ? ['er','Com erros']
+    : warn
+      ? ['wa','Correta, com avisos']
+      : ['ok','Correta'];
+
+  const nErr = r.A.filter(a => a.erros.length).length;
+
+  let h =
+    '<div class="card">' +
+      '<div class="hd">' +
+        '<h2>' + esc(name) + '</h2>' +
+        '<span class="bg ' + st[0] + '">' + st[1] + '</span>' +
+        '<dl>' +
+          Object.entries(r.I)
+            .filter(([,v]) => v)
+            .map(([k,v]) =>
+              '<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>'
+            ).join('') +
+        '</dl>' +
+      '</div>';
+
+  h +=
+    '<div class="sec">' +
+      '<h3>Resumo da lista</h3>' +
+      '<ul>' +
+        r.C.map(c =>
+          '<li class="' + c.t + '">' + esc(c.m) + '</li>'
+        ).join('') +
+      '</ul>' +
+    '</div>';
+
+  if (r.A.length) {
+    h +=
+      '<div class="sec">' +
+        '<h3>Alunos (' + r.A.length + ' lidos, ' + nErr + ' com problema)</h3>' +
+        '<ul>' +
+          r.A.map(a =>
+            '<li class="' + (a.erros.length ? 'er' : 'ok') + '">' +
+              '<b>' + esc(a.nome) + '</b>: ' +
+              'Presenças ' + a.p +
+              ' · Ausências ' + a.a +
+              ' · Sem aula (-) ' + a.dash +
+              ' · Em branco ' + a.blank +
+              (a.erros.length
+                ? '<br>' + esc(a.erros.join('; '))
+                : '') +
+            '</li>'
+          ).join('') +
+        '</ul>' +
+      '</div>';
+  }
+
+  h +=
+    '<div class="sec">' +
+      '<span class="small">A conferência automática é uma ferramenta de apoio. OCR e identificação de assinaturas podem exigir conferência manual.</span>' +
+    '</div>' +
+    '</div>';
+
+  return h;
 }
-async function run(files){
-  const out=document.getElementById('out');out.innerHTML='';
-  for(const f of files){
-    const box=document.createElement('div');out.appendChild(box);
-    try{
-      const isPdf=/pdf$/i.test(f.type)||/\.pdf$/i.test(f.name);
-      if(!isPdf&&!/^image\//.test(f.type))throw new Error('Formato não suportado. Envie PDF ou imagem (PNG/JPG). Se for Excel (.xlsx), exporte como PDF.');
-      box.innerHTML='<div class="card"><div class="hd"><h2>'+esc(f.name)+'</h2>Lendo o arquivo… imagens podem levar até 1 minuto.</div></div>';
-      const {items,sigs,ocr,img}=await extract(f);
-      if(!items.length)throw new Error('Não consegui ler texto neste arquivo. Envie uma imagem mais nítida ou o PDF gerado da planilha.');
-      box.innerHTML=render(f.name,analyze(items,sigs,ocr,img));
-    }catch(e){box.innerHTML='<div class="card"><div class="hd"><h2>'+esc(f.name)+'</h2><span class="bg er">Não foi possível ler</span><p>'+esc(e.message)+'</p></div></div>'}
+
+async function run(files) {
+  const out = document.getElementById('out');
+  out.innerHTML = '';
+
+  if (!files.length) return;
+
+  for (const f of files) {
+    const box = document.createElement('div');
+    out.appendChild(box);
+
+    try {
+      const isPdf =
+        /pdf$/i.test(f.type) ||
+        /\.pdf$/i.test(f.name);
+
+      const isImage = /^image\//i.test(f.type);
+
+      if (!isPdf && !isImage) {
+        throw new Error(
+          'Formato não suportado. Envie PDF ou imagem (PNG/JPG).'
+        );
+      }
+
+      box.innerHTML =
+        '<div class="card">' +
+          '<div class="hd">' +
+            '<h2>' + esc(f.name) + '</h2>' +
+            'Lendo o arquivo… imagens podem levar algum tempo.' +
+            '<div class="progress"><span></span></div>' +
+          '</div>' +
+        '</div>';
+
+      const progress = box.querySelector('.progress span');
+
+      if (progress) progress.style.width = '10%';
+
+      const result = await extract(f);
+
+      if (progress) progress.style.width = '70%';
+
+      if (!result.items.length) {
+        throw new Error(
+          'Não consegui ler texto neste arquivo. Envie uma imagem mais nítida ou um PDF gerado da planilha.'
+        );
+      }
+
+      const analyzed = analyze(
+        result.items,
+        result.sigs,
+        result.ocr,
+        result.img
+      );
+
+      if (progress) progress.style.width = '100%';
+
+      box.innerHTML = render(f.name,analyzed);
+
+    } catch(e) {
+      box.innerHTML =
+        '<div class="card">' +
+          '<div class="hd">' +
+            '<h2>' + esc(f.name) + '</h2>' +
+            '<span class="bg er">Não foi possível ler</span>' +
+            '<p>' + esc(e && e.message ? e.message : 'Erro desconhecido.') + '</p>' +
+          '</div>' +
+        '</div>';
+    }
   }
 }
-const fi=document.getElementById('f');
-fi.addEventListener('change',()=>run([...fi.files]));
-const dz=document.querySelector('.dz');
-dz.addEventListener('dragover',e=>e.preventDefault());
-dz.addEventListener('drop',e=>{e.preventDefault();run([...e.dataTransfer.files])});
-</script></body></html>
+
+const fi = document.getElementById('f');
+
+fi.addEventListener('change', () => {
+  run([...fi.files]);
+});
+
+const dz = document.querySelector('.dz');
+
+dz.addEventListener('dragover', e => {
+  e.preventDefault();
+  dz.style.opacity = '.8';
+});
+
+dz.addEventListener('dragleave', () => {
+  dz.style.opacity = '1';
+});
+
+dz.addEventListener('drop', e => {
+  e.preventDefault();
+  dz.style.opacity = '1';
+  run([...e.dataTransfer.files]);
+});
+</script>
+</body>
+</html>
