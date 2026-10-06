@@ -591,21 +591,125 @@ function parseReference(items) {
   return {mi,ano};
 }
 
+/*
+ * Leitura robusta da periodicidade.
+ * Aceita nomes completos, plurais, "terça-feira", abreviações e 2ª/5ª.
+ */
 function extractPeriodDays(per) {
-  const text = norm(per).replace(/\bvezes?\b/g,' vez');
-  const days = [];
+  let text = norm(per)
+    .replace(/[–—−]/g,'-')
+    .replace(/\bfeira(s)?\b/g,'')
+    .replace(/[(),;]/g,' ');
 
-  for (const [name,num] of Object.entries(DIA)) {
-    if (new RegExp(`\\b${name}\\b`).test(text)) {
-      if (!days.includes(num)) days.push(num);
+  const days = [];
+  const add = n => {
+    if (!days.includes(n)) days.push(n);
+  };
+
+  const aliases = [
+    [/\bdom(?:ingo|ingos)?\b/i,0],
+    [/\bseg(?:unda|undas)?\b/i,1],
+    [/\bter(?:ca|cas)\b/i,2],
+    [/\bqua(?:rta|rtas)?\b/i,3],
+    [/\bqui(?:nta|ntas)?\b/i,4],
+    [/\bsex(?:ta|tas)?\b/i,5],
+    [/\bsab(?:ado|ados)?\b/i,6]
+  ];
+
+  for (const [re,n] of aliases) {
+    if (re.test(text)) add(n);
+  }
+
+  /* 1ª=domingo, 2ª=segunda, ..., 7ª=sábado. */
+  for (const m of text.matchAll(/\b([1-7])\s*(?:ª|a|º)\b/gi)) {
+    add(Number(m[1]) - 1);
+  }
+
+  /*
+   * Alguns OCRs removem o símbolo ordinal e deixam "2 e 5".
+   * Só aceitamos números nesse formato quando há contexto de periodicidade.
+   */
+  if (/\b(?:vez|vezes|semana|semanal|dias?)\b/i.test(text)) {
+    for (const m of text.matchAll(/(?:^|[\s/,-])([1-7])(?:\s*(?:e|\/)\s*([1-7]))+/gi)) {
+      add(Number(m[1]) - 1);
+      if (m[2]) add(Number(m[2]) - 1);
     }
   }
 
   days.sort((a,b) => a-b);
+  const q = text.match(/\b(\d+)\s*vez(?:es)?\b/i);
 
-  const q = text.match(/(\d+)\s*vez(?:es)?/);
+  return {
+    days,
+    frequency:q ? Number(q[1]) : null,
+    text
+  };
+}
 
-  return {days,frequency:q ? Number(q[1]) : null};
+/*
+ * Reconstrói o campo "Periodicidade" mesmo quando o OCR separa
+ * o rótulo e o valor em linhas diferentes.
+ */
+function readPeriodicity(items, currentValue='') {
+  const candidates = [];
+  if (currentValue) candidates.push(currentValue);
+
+  const labels = items.filter(i =>
+    /^periodicidade\s*:?\s*$/i.test(String(i.s || '').trim())
+  );
+
+  for (const label of labels) {
+    const nearby = items
+      .filter(i => {
+        if (i === label) return false;
+
+        const dy = i.y - label.y;
+        const dx = i.x - label.x;
+
+        const sameLine = Math.abs(dy) <= 12 && dx > -5 && dx < 500;
+        const below = dy > 0 && dy <= 42 && Math.abs(dx) < 500;
+
+        return sameLine || below;
+      })
+      .sort((a,b) => {
+        const da = Math.abs(a.y-label.y) + Math.max(0, label.x-a.x);
+        const db = Math.abs(b.y-label.y) + Math.max(0, label.x-b.x);
+        return da-db;
+      });
+
+    if (nearby.length) {
+      candidates.push(nearby.slice(0,12).map(i => i.s).join(' '));
+    }
+  }
+
+  /* Último recurso: texto integral do documento. */
+  candidates.push(
+    items.slice()
+      .sort((a,b) => a.y-b.y || a.x-b.x)
+      .map(i => i.s)
+      .join(' ')
+  );
+
+  let best = {
+    value:'',
+    parsed:{days:[],frequency:null,text:''},
+    score:-1
+  };
+
+  for (const value of candidates) {
+    const parsed = extractPeriodDays(value);
+    let score = parsed.days.length * 10;
+
+    if (parsed.frequency != null) score += 3;
+    if (/periodicidade/i.test(value)) score += 4;
+    if (/\b(?:semana|semanal|vez|vezes)\b/i.test(parsed.text)) score += 2;
+
+    if (score > best.score) {
+      best = {value:value.trim(), parsed, score};
+    }
+  }
+
+  return best;
 }
 
 function buildCalendar(year, monthIndex, periodicityDays) {
@@ -790,7 +894,13 @@ function analyze(items,dsig,ocr,img) {
   I['Professor'] = prof;
   I['Coordenador'] = coord;
   I['Horário'] = val(items,/^hor(?:ário|ario):?\s*(.*)$/i,0,CUT);
-  I['Periodicidade'] = val(items,/^periodicidade:?\s*(.*)$/i,1,CUT);
+
+  const periodicidadeLida = readPeriodicity(
+    items,
+    val(items,/^periodicidade:?\s*(.*)$/i,1,CUT)
+  );
+
+  I['Periodicidade'] = periodicidadeLida.value || '';
 
   if (mi == null || !ano) {
     return {
@@ -801,13 +911,13 @@ function analyze(items,dsig,ocr,img) {
 
   I['Mês'] = `${MES[mi]}/${ano}`;
 
-  const {days:dias,frequency} = extractPeriodDays(I['Periodicidade'] || '');
+  const {days:dias,frequency} = periodicidadeLida.parsed;
 
   if (!dias.length) {
     return {
       C:[{
         t:'er',
-        m:`Não consegui ler os dias da semana na periodicidade ("${I['Periodicidade'] || 'não lida'}").`
+        m:`Não consegui identificar os dias da semana. O campo lido foi: "${I['Periodicidade'] || 'não lido'}". Formatos aceitos: terça e quinta, terça-feira e quinta-feira, ter/qui ou 2ª e 5ª.`
       }],
       I,A
     };
@@ -819,7 +929,11 @@ function analyze(items,dsig,ocr,img) {
       `Periodicidade inconsistente: informa ${frequency} vez(es) por semana, mas a lista contém ${dias.length} dia(s).`
     );
   } else {
-    add('ok',`Periodicidade: ${dias.map(d => NS[d]).join(' e ')}`);
+    add(
+      'ok',
+      `Periodicidade lida: ${dias.map(d => NS[d]).join(' e ')}.` +
+      (frequency != null ? ` Frequência informada: ${frequency} vez(es)/semana.` : '')
+    );
   }
 
   const dim = new Date(ano,mi+1,0).getDate();
