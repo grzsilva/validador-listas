@@ -48,21 +48,22 @@ async function extract(file){
   const tc=await (await pdf.getPage(1)).getTextContent();
   return tc.items.map(i=>({s:i.str.trim(),x:i.transform[4],y:i.transform[5],w:i.width})).filter(i=>i.s);
 }
-function val(items,re){
-  let l,m;const c=items.filter(i=>re.test(i.s)).sort((a,b)=>b.y-a.y);l=c[0];if(!l)return '';
-  m=re.exec(l.s);if(m[1])return m[1].trim();
-  const n=items.filter(i=>i!==l&&Math.abs(i.y-l.y)<4&&i.x>l.x+l.w-2).sort((a,b)=>a.x-b.x)[0];
-  return n?n.s:'';
+function val(items,re,multi,cut){
+  const l=items.filter(i=>re.test(i.s)).sort((a,b)=>b.y-a.y)[0];if(!l)return '';
+  const m=re.exec(l.s);if(m[1])return m[1].trim();
+  const n=items.filter(i=>i!==l&&Math.abs(i.y-l.y)<(multi?10:9)&&i.x>l.x+l.w-2&&i.x<(cut||1e9));
+  if(multi)return n.sort((a,b)=>b.y-a.y||a.x-b.x).map(i=>i.s).join(' ');
+  n.sort((a,b)=>a.x-b.x);return n[0]?n[0].s:'';
 }
 function analyze(items){
   const C=[],A=[],I={};
   const add=(t,m)=>C.push({t,m});
-  const mi=items.map(i=>MES.indexOf(norm(i.s))).find(m=>m>=0);
+  const mItem=items.find(i=>MES.indexOf(norm(i.s))>=0);const mi=mItem?MES.indexOf(norm(mItem.s)):undefined;
   const ano=+((items.find(i=>/^20\d\d$/.test(i.s))||{}).s);
   I.Núcleo=val(items,/^n[uú]cleo:\s*(.*)$/i);I.Turma=val(items,/^turma:\s*(.*)$/i);
   const prof=val(items,/^professor:\s*(.*)$/i),coord=val(items,/^coordenador:\s*(.*)$/i);
   I.Professor=prof;I.Coordenador=coord;I.Horário=val(items,/^hor[aá]rio:?\s*(.*)$/i);
-  const per=val(items,/^periodicidade:?\s*(.*)$/i);I.Periodicidade=per;
+  const per=val(items,/^periodicidade:?\s*(.*)$/i,true,mItem?mItem.x:1e9);I.Periodicidade=per;
   if(mi==null||!ano)return{C:[{t:'er',m:'Não encontrei o mês/ano de referência na lista.'}],I,A};
   I.Mês=MES[mi]+'/'+ano;
   const dias=Object.keys(DIA).filter(k=>norm(per).includes(k)).map(k=>DIA[k]);
@@ -75,7 +76,7 @@ function analyze(items){
   add('ok','Dias de aula em '+I.Mês+': '+aula.join(', ')+' ('+aula.length+' aulas)');
   // assinaturas
   const sig=items.filter(i=>/^data:\s*\d{2}\/\d{2}\/\d{4}/i.test(i.s)).map(d=>{
-    const n=items.filter(i=>Math.abs(i.x-d.x)<10&&i.y>d.y+3&&i.y<d.y+26&&!/documento|assinad|data:|verifique/i.test(i.s)).sort((a,b)=>a.y-b.y)[0];
+    const n=items.filter(i=>Math.abs(i.x-d.x)<14&&i.y>d.y+3&&i.y<d.y+26&&!/documento|assinad|data:|verifique/i.test(i.s)).sort((a,b)=>a.y-b.y)[0];
     return{nome:n?n.s:'?',data:d.s.slice(6,16)};
   });
   if(!sig.length)add('er','Nenhuma assinatura digital (gov.br) encontrada.');
