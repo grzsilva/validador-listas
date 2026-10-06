@@ -30,8 +30,8 @@ li.ok:before{content:"✔";color:var(--ok)}li.er:before{content:"✘";color:var(
 li.ok,li.er,li.wa{background:none}
 </style></head><body><main>
 <h1>Conferência de listas de presença</h1>
-<p class="s">Envie o PDF da lista. Confere P/A nos dias da periodicidade e se instrutor e coordenador assinaram. A análise roda no seu navegador: nada é enviado nem salvo.</p>
-<label class="dz"><input id="f" type="file" accept="application/pdf" multiple><b>Escolher PDFs</b> ou arrastar para cá</label>
+<p class="s">Envie o PDF ou a imagem (foto/print) da lista. Confere P/A nos dias da periodicidade e se instrutor e coordenador assinaram. A análise roda no seu navegador: nada é enviado nem salvo.</p>
+<label class="dz"><input id="f" type="file" accept="application/pdf,image/*" multiple><b>Escolher PDFs ou imagens</b> ou arrastar para cá</label>
 <div id="out"></div></main>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
@@ -66,25 +66,44 @@ function readSigs(buf){
   }catch(e){}}
   return out;
 }
+const loadJs=u=>new Promise((ok,no)=>{const e=document.createElement('script');e.src=u;e.onload=ok;e.onerror=()=>no(new Error('Não foi possível carregar o leitor de imagens (OCR). Verifique a internet.'));document.head.appendChild(e)});
+async function ocrItems(cv){
+  if(!window.Tesseract)await loadJs('https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/6.0.0/tesseract.min.js');
+  const w=await Tesseract.createWorker('por');
+  let data;try{data=(await w.recognize(cv,{},{blocks:true})).data}finally{await w.terminate()}
+  const ws=data.words||(data.blocks||[]).flatMap(b=>b.paragraphs.flatMap(p=>p.lines.flatMap(l=>l.words)));
+  const W=cv.width,H=cv.height,k=(W>H?842:595)/W;
+  return ws.filter(x=>x.text&&x.text.trim()).map(x=>({s:x.text.trim(),x:x.bbox.x0*k,y:(H-x.bbox.y1)*k,w:(x.bbox.x1-x.bbox.x0)*k}));
+}
 async function extract(file){
   const buf=await file.arrayBuffer();
-  const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise;
-  const tc=await (await pdf.getPage(1)).getTextContent();
+  if(/^image\//.test(file.type)){
+    const bm=await createImageBitmap(file),k=2200/bm.width,cv=document.createElement('canvas');
+    cv.width=2200;cv.height=Math.round(bm.height*k);cv.getContext('2d').drawImage(bm,0,0,cv.width,cv.height);
+    return{items:await ocrItems(cv),sigs:null,ocr:1,img:1};
+  }
+  const pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise,pg=await pdf.getPage(1);
+  const tc=await pg.getTextContent();
   const items=tc.items.map(i=>({s:i.str.trim(),x:i.transform[4],y:i.transform[5],w:i.width})).filter(i=>i.s);
-  return{items,sigs:readSigs(buf)};
+  const sigs=readSigs(buf);
+  if(items.length>=40)return{items,sigs};
+  const vp=pg.getViewport({scale:2.6}),cv=document.createElement('canvas');cv.width=vp.width;cv.height=vp.height;
+  await pg.render({canvasContext:cv.getContext('2d'),viewport:vp}).promise;
+  return{items:await ocrItems(cv),sigs,ocr:1};
 }
 function val(items,re,multi,cut){
   const l=items.filter(i=>re.test(i.s)).sort((a,b)=>b.y-a.y)[0];if(!l)return '';
   const m=re.exec(l.s);if(m[1])return m[1].trim();
-  const bl=items.filter(i=>i!==l&&/^(n[uú]cleo|turma|periodicidade|modalidade|hor[aá]rio|professor|coordenador|auxiliar):?$/i.test(i.s)&&i.x>l.x+l.w&&Math.abs(i.y-l.y)<6).map(i=>i.x);
+  const bl=items.filter(i=>i!==l&&(/^(n[uú]cleo|turma|modalidade|professor|coordenador|auxiliar):$/i.test(i.s)||/^(periodicidade|hor[aá]rio):?$/i.test(i.s))&&i.x>l.x+l.w&&Math.abs(i.y-l.y)<6).map(i=>i.x);
   const lim=Math.min(cut||1e9,...bl),x0=l.x+l.w-2;
   const n=items.filter(i=>i!==l&&i.x>x0&&i.x<lim&&!/^20\d\d$/.test(i.s)&&Math.abs(i.y-l.y)<(multi?10:9));
   if(multi)return n.sort((a,b)=>b.y-a.y||a.x-b.x).map(i=>i.s).join(' ');
-  n.sort((a,b)=>Math.abs(a.y-l.y)-Math.abs(b.y-l.y)||a.x-b.x);return n[0]?n[0].s:'';
+  n.sort((a,b)=>Math.abs(a.y-l.y)-Math.abs(b.y-l.y)||a.x-b.x);if(!n[0])return '';const dy=Math.abs(n[0].y-l.y);return n.filter(i=>Math.abs(Math.abs(i.y-l.y)-dy)<3).sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ');
 }
-function analyze(items,dsig){
+function analyze(items,dsig,ocr,img){
   const C=[],A=[],I={};
   const add=(t,m)=>C.push({t,m});
+  if(ocr)add('wa','Leitura por imagem (OCR): resultado aproximado. Confira cada apontamento no original.');
   const mItem=items.find(i=>MES.indexOf(norm(i.s))>=0);const mi=mItem?MES.indexOf(norm(mItem.s)):undefined;
   const ano=+((items.find(i=>/^20\d\d$/.test(i.s))||{}).s);
   const CUT=mItem?mItem.x:1e9;I.Núcleo=val(items,/^n[uú]cleo:\s*(.*)$/i,0,CUT);I.Turma=val(items,/^turma:\s*(.*)$/i,0,CUT);
@@ -107,7 +126,8 @@ function analyze(items,dsig){
     return{nome:n?n.s:'?',data:d.s.slice(6,16)};
   });
   const sig=dsig&&dsig.length?dsig:ts;
-  if(!sig.length)add('er','Nenhuma assinatura digital (gov.br) encontrada.');
+  if(img)add('wa','Arquivo em imagem: não dá para verificar as assinaturas digitais. Confira instrutor e coordenador no original.');
+  else if(!sig.length)add('er','Nenhuma assinatura digital (gov.br) encontrada.');
   else{
     add('ok','Assinaturas digitais encontradas ('+sig.length+'): '+sig.map(x=>x.nome+(x.data?' em '+x.data:'')).join('; '));
     const has=n=>sig.some(s=>{const a=norm(s.nome),b=norm(n);return b&&(a===b||a.includes(b)||b.includes(a))});
@@ -118,8 +138,9 @@ function analyze(items,dsig){
   // grade de dias
   const g={};items.forEach(i=>{if(/^\d{1,2}$/.test(i.s)&&+i.s>=1&&+i.s<=31)(g[Math.round(i.y/3)]=g[Math.round(i.y/3)]||[]).push(i)});
   const hdr=Object.values(g).sort((a,b)=>new Set(b.map(i=>i.s)).size-new Set(a.map(i=>i.s)).size)[0];
-  if(!hdr||new Set(hdr.map(i=>i.s)).size<28){add('er','Não encontrei a linha dos dias do mês.');return{C,I,A};}
+  if(!hdr||new Set(hdr.map(i=>i.s)).size<(ocr?18:28)){add('er','Não encontrei a linha dos dias do mês.');return{C,I,A};}
   const cx={};hdr.forEach(i=>cx[+i.s]=i.x+i.w/2);
+  if(ocr){const P=Object.entries(cx).map(([d,x])=>[+d,x]),n=P.length,sx=P.reduce((a,q)=>a+q[0],0),sy=P.reduce((a,q)=>a+q[1],0),sxx=P.reduce((a,q)=>a+q[0]*q[0],0),sxy=P.reduce((a,q)=>a+q[0]*q[1],0),bb=(n*sxy-sx*sy)/(n*sxx-sx*sx),a0=(sy-bb*sx)/n;for(let d=1;d<=31;d++)cx[d]=a0+bb*d}
   const ds=Object.keys(cx).map(Number),mn=Math.min(...ds),mx=Math.max(...ds),sp=(cx[mx]-cx[mn])/(mx-mn);
   const L=cx[mn]-sp*.6,R=cx[mx]+sp*.6,hy=hdr[0].y;
   const body=items.filter(i=>i.y<hy-3).sort((a,b)=>b.y-a.y),rows=[];
@@ -131,7 +152,7 @@ function analyze(items,dsig){
     r.it.forEach(i=>{const c=i.x+i.w/2;if(c<L||c>R)return;
       let d=ds.reduce((a,b)=>Math.abs(cx[b]-c)<Math.abs(cx[a]-c)?b:a);
       if(Math.abs(cx[d]-c)>sp*.6)return;
-      if(/^[PA]$/.test(i.s))mk[d]=i.s;else if(/^[-–—]$/.test(i.s))mk[d]='-';else inv.push(dm(d)+' ("'+i.s+'")')});
+      const t=i.s.toUpperCase().replace(/^[_—–]$/,'-');if(/^[PA]$/.test(t))mk[d]=t;else if(/^[-–—]$/.test(t))mk[d]='-';else if(!ocr)inv.push(dm(d)+' ("'+i.s+'")')});
     const falta=aula.filter(d=>!mk[d]).map(dm),fora=Object.keys(mk).map(Number).filter(d=>!aula.includes(d)&&mk[d]!=='-').map(d=>dm(d)+' ('+mk[d]+')');
     if(!Object.keys(mk).length)erros.push('sem nenhum registro no mês');
     else{if(falta.length)erros.push('dia(s) de aula sem P/A: '+falta.join(', '));}
@@ -140,6 +161,7 @@ function analyze(items,dsig){
     const nums=r.it.filter(i=>i.x+i.w/2>R&&/^\d+$/.test(i.s)).sort((a,b)=>a.x-b.x).map(i=>+i.s);
     const cA=Object.values(mk).filter(v=>v==='A').length,cP=Object.values(mk).filter(v=>v==='P').length;
     if(nums.length>=2&&(nums[0]!==cA||nums[1]!==cP))erros.push('totais impressos (A '+nums[0]+' / P '+nums[1]+') diferem do contado (A '+cA+' / P '+cP+')');
+    if(!Object.keys(mk).length&&!/\s/.test(nome))return;
     A.push({nome,erros,p:cP,a:cA,dash:Object.values(mk).filter(v=>v==='-').length,blank:falta.length,mk});
   });
   if(!A.length)add('er','Não encontrei alunos na lista.');
@@ -168,9 +190,12 @@ async function run(files){
   for(const f of files){
     const box=document.createElement('div');out.appendChild(box);
     try{
-      const {items,sigs}=await extract(f);
-      if(!items.length)throw new Error('PDF sem texto (provavelmente digitalizado). Envie o PDF gerado direto da planilha.');
-      box.innerHTML=render(f.name,analyze(items,sigs));
+      const isPdf=/pdf$/i.test(f.type)||/\.pdf$/i.test(f.name);
+      if(!isPdf&&!/^image\//.test(f.type))throw new Error('Formato não suportado. Envie PDF ou imagem (PNG/JPG). Se for Excel (.xlsx), exporte como PDF.');
+      box.innerHTML='<div class="card"><div class="hd"><h2>'+esc(f.name)+'</h2>Lendo o arquivo… imagens podem levar até 1 minuto.</div></div>';
+      const {items,sigs,ocr,img}=await extract(f);
+      if(!items.length)throw new Error('Não consegui ler texto neste arquivo. Envie uma imagem mais nítida ou o PDF gerado da planilha.');
+      box.innerHTML=render(f.name,analyze(items,sigs,ocr,img));
     }catch(e){box.innerHTML='<div class="card"><div class="hd"><h2>'+esc(f.name)+'</h2><span class="bg er">Não foi possível ler</span><p>'+esc(e.message)+'</p></div></div>'}
   }
 }
@@ -178,5 +203,5 @@ const fi=document.getElementById('f');
 fi.addEventListener('change',()=>run([...fi.files]));
 const dz=document.querySelector('.dz');
 dz.addEventListener('dragover',e=>e.preventDefault());
-dz.addEventListener('drop',e=>{e.preventDefault();run([...e.dataTransfer.files].filter(f=>/pdf$/i.test(f.type||f.name)))});
+dz.addEventListener('drop',e=>{e.preventDefault();run([...e.dataTransfer.files])});
 </script></body></html>
