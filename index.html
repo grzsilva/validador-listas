@@ -69,6 +69,32 @@ button{
 }
 button:hover{border-color:var(--ac)}
 .small{font-size:.82rem;color:var(--mu)}
+.date-note{font-family:system-ui,sans-serif;font-size:.9rem;margin-top:8px;color:var(--mu)}
+.table-wrap{overflow:auto;margin-top:12px;border:1px solid var(--bd);border-radius:12px}
+.calendar-table,.matrix{width:100%;border-collapse:collapse;font-size:.86rem;background:var(--bg)}
+.calendar-table th,.calendar-table td,.matrix th,.matrix td{border-bottom:1px solid var(--bd);padding:8px 7px;text-align:center;white-space:nowrap}
+.calendar-table th,.matrix thead th{position:sticky;top:0;background:var(--card);z-index:2}
+.calendar-table th:first-child,.calendar-table td:first-child{position:sticky;left:0;background:var(--card);z-index:3}
+.pill{display:inline-block;padding:3px 7px;border-radius:999px;font-size:.72rem;font-weight:700}
+.pill.expected{background:rgba(45,125,255,.12);color:#2d7dff}
+.pill.ok{background:rgba(46,160,67,.14);color:#2e8b57}
+.pill.wa{background:rgba(220,160,0,.16);color:#a06b00}
+.pill.er{background:rgba(210,50,50,.14);color:#b3261e}
+.matrix .student-name{text-align:left;min-width:190px;position:sticky;left:0;background:var(--card);z-index:3}
+.matrix thead .student-name{z-index:5}
+.matrix th small{display:block;font-weight:400;opacity:.65;font-size:.68rem;margin-top:2px}
+.matrix td{min-width:38px;font-weight:800}
+.matrix td.present{background:rgba(46,160,67,.15);color:#24743d}
+.matrix td.absent{background:rgba(210,50,50,.15);color:#a52222}
+.matrix td.dash{background:rgba(150,150,150,.13);color:var(--mu)}
+.matrix td.blank{background:rgba(220,160,0,.10);color:#a06b00}
+.student-total{font-weight:800;position:sticky;right:0;background:var(--card)}
+@media(max-width:800px){
+  .calendar-table,.matrix{font-size:.78rem}
+  .calendar-table th,.calendar-table td,.matrix th,.matrix td{padding:6px 5px}
+  .matrix .student-name{min-width:150px}
+}
+
 .progress{margin-top:10px;height:6px;background:var(--bd);border-radius:99px;overflow:hidden}
 .progress>span{display:block;height:100%;width:0;background:var(--ac);transition:width .2s}
 @media(max-width:560px){
@@ -481,33 +507,85 @@ function parseReference(items) {
     MES.map((m,i) => [norm(m),i])
   );
 
-  let mItem = items.find(i => monthMap[norm(i.s)] !== undefined);
-
   /*
-   * Também aceita "mês: agosto", "agosto/2026" e "08/2026".
+   * Primeiro localizamos o mês. Depois procuramos o ano relacionado
+   * espacialmente a esse mês. Isso evita confundir o ano do número do
+   * convênio/projeto (ex.: 959182/2025) com o ano do calendário (2026).
    */
+  let mItem = items.find(i => monthMap[norm(i.s)] !== undefined);
   let mi = mItem ? monthMap[norm(mItem.s)] : null;
 
   if (mi == null) {
     const joined = items.map(i => i.s).join(' ');
+
     const mm = joined.match(
       /\b(janeiro|fevereiro|março|marco|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\b/i
     );
-    if (mm) mi = monthMap[norm(mm[1])];
-    else {
-      const numeric = joined.match(/\b(0?[1-9]|1[0-2])\s*[\/-]\s*(20\d{2})\b/);
+
+    if (mm) {
+      mi = monthMap[norm(mm[1])];
+    } else {
+      const numeric = joined.match(
+        /\b(0?[1-9]|1[0-2])\s*[\/-]\s*(20\d{2})\b/
+      );
+
       if (numeric) mi = Number(numeric[1])-1;
     }
   }
 
-  let ano;
-  const years = items
-    .map(i => i.s.match(/\b(20\d{2})\b/))
-    .filter(Boolean)
-    .map(m => Number(m[1]));
+  const yearItems = items
+    .map(i => {
+      const m = String(i.s || '').match(/\b(20\d{2})\b/);
+      return m
+        ? {...i, year:Number(m[1])}
+        : null;
+    })
+    .filter(Boolean);
 
-  if (years.length) {
-    ano = years.sort((a,b) => years.filter(x => x===b).length - years.filter(x => x===a).length)[0];
+  let ano = null;
+
+  if (mItem && yearItems.length) {
+    /*
+     * O ano do calendário normalmente fica abaixo/acima do nome do mês
+     * e com X muito próximo. Priorizamos distância horizontal e vertical.
+     */
+    const ranked = yearItems
+      .map(y => {
+        const mx = mItem.x + (mItem.w || 0)/2;
+        const my = mItem.y;
+        const yx = y.x + (y.w || 0)/2;
+        const yy = y.y;
+
+        const dx = Math.abs(yx-mx);
+        const dy = Math.abs(yy-my);
+
+        /*
+         * Ano na mesma região visual recebe peso maior que ano distante.
+         * Um ano em outro cabeçalho (como 2025 do número do processo)
+         * fica naturalmente com pontuação pior.
+         */
+        const score = dx * 1.5 + dy;
+
+        return {year:y.year,score,dx,dy};
+      })
+      .sort((a,b) => a.score-b.score);
+
+    if (ranked[0]) ano = ranked[0].year;
+  }
+
+  /*
+   * Fallback: se não houver uma associação espacial, usamos frequência,
+   * mas somente entre anos que aparecem isoladamente como "20xx".
+   */
+  if (!ano && yearItems.length) {
+    const freq = new Map();
+
+    for (const y of yearItems) {
+      freq.set(y.year,(freq.get(y.year) || 0)+1);
+    }
+
+    ano = [...freq.entries()]
+      .sort((a,b) => b[1]-a[1])[0][0];
   }
 
   return {mi,ano};
@@ -530,29 +608,51 @@ function extractPeriodDays(per) {
   return {days,frequency:q ? Number(q[1]) : null};
 }
 
+function buildCalendar(year, monthIndex, periodicityDays) {
+  const last = new Date(year, monthIndex + 1, 0).getDate();
+  const dates = [];
+
+  for (let day = 1; day <= last; day++) {
+    const dt = new Date(year, monthIndex, day);
+    const weekday = dt.getDay();
+
+    dates.push({
+      day,
+      date: dt,
+      weekday,
+      weekdayName: NS[weekday],
+      expected: periodicityDays.includes(weekday),
+      key: `${year}-${String(monthIndex + 1).padStart(2,'0')}-${String(day).padStart(2,'0')}`
+    });
+  }
+
+  return dates;
+}
+
+function formatDateBR(year, monthIndex, day) {
+  return `${String(day).padStart(2,'0')}/${String(monthIndex + 1).padStart(2,'0')}/${year}`;
+}
+
 function detectHeaderDays(items, monthIndex, year) {
   /*
-   * A versão anterior escolhia simplesmente a linha com mais números.
-   * Isso é perigoso porque uma lista pode ter números de matrícula,
-   * totais, telefones, horários etc.
+   * O cabeçalho da lista é uma representação visual do calendário.
+   * Porém alguns modelos terminam com o primeiro dia do mês seguinte:
    *
-   * Agora procuramos uma sequência horizontal de dias. A pontuação
-   * privilegia:
-   *   1. números válidos para o mês/ano;
-   *   2. sequência crescente;
-   *   3. proximidade horizontal regular;
-   *   4. quantidade de dias encontrados.
+   *   1 2 3 ... 29 30 1
+   *
+   * Portanto NÃO usamos a posição da coluna como se ela fosse a data.
+   * Primeiro identificamos o número impresso e o transformamos em uma
+   * data real do mês/ano. O último "1" fica fora porque já existe o
+   * dia 1 do mês atual.
    */
-  const maxDay = (monthIndex != null && year)
-    ? new Date(year, monthIndex + 1, 0).getDate()
-    : 31;
+  const maxDay = new Date(year, monthIndex + 1, 0).getDate();
 
   const nums = items
     .filter(i => /^\d{1,2}$/.test(String(i.s).trim()))
     .map(i => ({
       ...i,
-      d:Number(String(i.s).trim()),
-      cx:i.x + (i.w || 0)/2
+      d: Number(String(i.s).trim()),
+      cx: i.x + (i.w || 0) / 2
     }))
     .filter(i => i.d >= 1 && i.d <= maxDay);
 
@@ -561,125 +661,104 @@ function detectHeaderDays(items, monthIndex, year) {
   const groups = new Map();
 
   nums.forEach(i => {
-    /*
-     * Em PDF a mesma linha costuma ter Y praticamente igual.
-     * No OCR existe mais variação, por isso usamos uma tolerância maior.
-     */
     const key = Math.round(i.y / 5) * 5;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(i);
   });
 
   function scoreGroup(group) {
+    const ordered = group.slice().sort((a,b) => a.cx-b.cx);
+
+    /*
+     * Para cada dia, guardamos somente a primeira ocorrência.
+     * Isso é essencial para o padrão "... 29 30 1": o primeiro "1"
+     * é junho/1 e o segundo "1" seria julho/1.
+     */
     const byDay = new Map();
 
-    group.forEach(i => {
-      const old = byDay.get(i.d);
-
-      /*
-       * Algumas listas terminam o calendário com o primeiro dia do
-       * mês seguinte. Ex.: junho aparece como 1..30,1.
-       *
-       * Se fizermos a escolha apenas pela largura do texto, o "1"
-       * final pode substituir o "1" verdadeiro e deslocar TODAS as
-       * colunas de presença. Para números repetidos, mantemos sempre
-       * o que estiver mais à esquerda, pois o cabeçalho do mês é
-       * montado da esquerda para a direita.
-       */
-      if (!old || i.cx < old.cx) byDay.set(i.d, i);
-    });
+    for (const item of ordered) {
+      if (!byDay.has(item.d)) byDay.set(item.d, item);
+    }
 
     const days = [...byDay.keys()].sort((a,b) => a-b);
 
-    if (days.length < 3) return {score:-Infinity, group:[]};
+    if (days.length < Math.min(5, maxDay)) {
+      return { score: -Infinity, group: [] };
+    }
 
     let consecutive = 0;
-    let gaps = 0;
+    let longest = days.length ? 1 : 0;
+    let current = days.length ? 1 : 0;
 
-    for (let i=1; i<days.length; i++) {
-      const diff = days[i] - days[i-1];
-      if (diff === 1) consecutive++;
-      else gaps += Math.min(diff - 1, 5);
+    for (let i = 1; i < days.length; i++) {
+      if (days[i] === days[i-1] + 1) {
+        consecutive++;
+        current++;
+        longest = Math.max(longest, current);
+      } else {
+        current = 1;
+      }
     }
 
     const points = [...byDay.values()].sort((a,b) => a.cx-b.cx);
 
     let regularity = 0;
     if (points.length >= 3) {
-      const gapsX = [];
-      for (let i=1; i<points.length; i++) {
+      const gaps = [];
+      for (let i = 1; i < points.length; i++) {
         const dx = points[i].cx - points[i-1].cx;
-        if (dx > 0) gapsX.push(dx);
+        if (dx > 0) gaps.push(dx);
       }
 
-      if (gapsX.length) {
-        const avg = gapsX.reduce((a,b) => a+b,0) / gapsX.length;
-        const variance = gapsX.reduce((a,b) => a + Math.pow(b-avg,2),0) / gapsX.length;
-        const cv = avg ? Math.sqrt(variance)/avg : 1;
-        regularity = Math.max(0, 20 - cv*20);
-      }
-    }
-
-    /*
-     * Bônus forte para começar em 1. Em uma lista mensal, o cabeçalho
-     * normalmente começa no dia 1 e segue 2, 3, 4...
-     */
-    const startsAtOne = days[0] === 1 ? 35 : 0;
-
-    /*
-     * Bônus para a maior sequência consecutiva encontrada.
-     */
-    let longest = days.length ? 1 : 0;
-    let current = days.length ? 1 : 0;
-
-    for (let i=1; i<days.length; i++) {
-      if (days[i] === days[i-1] + 1) {
-        current++;
-        longest = Math.max(longest,current);
-      } else {
-        current = 1;
+      if (gaps.length) {
+        const avg = gaps.reduce((a,b) => a+b,0) / gaps.length;
+        const variance =
+          gaps.reduce((a,b) => a + Math.pow(b-avg,2),0) / gaps.length;
+        const cv = avg ? Math.sqrt(variance) / avg : 1;
+        regularity = Math.max(0, 25 - cv * 25);
       }
     }
+
+    const startsAtOne = days[0] === 1 ? 40 : 0;
+    const hasEnd = days.includes(maxDay) ? 25 : 0;
 
     const score =
-      days.length * 10 +
-      consecutive * 18 +
-      longest * 15 +
+      days.length * 12 +
+      consecutive * 20 +
+      longest * 18 +
       regularity +
-      startsAtOne -
-      gaps * 8;
+      startsAtOne +
+      hasEnd;
 
-    return {
-      score,
-      group:points
-    };
+    return { score, group: points };
   }
 
   const ranked = [...groups.values()]
     .map(scoreGroup)
     .sort((a,b) => b.score-a.score);
 
-  if (!ranked[0]) return [];
+  if (!ranked[0] || !ranked[0].group.length) return [];
 
-  /*
-   * Depois de escolher a linha correta, reconstruímos a sequência
-   * esperada 1..último dia do mês. Isso elimina o "1" do mês seguinte
-   * que aparece em alguns modelos de lista (como junho: 1..30,1).
-   */
   const chosen = ranked[0].group
     .filter(i => i.d >= 1 && i.d <= maxDay)
-    .sort((a,b) => a.d-b.d || a.cx-b.cx);
+    .sort((a,b) => a.cx-b.cx);
 
-  const unique = [];
   const seen = new Set();
+  const out = [];
 
-  for (const i of chosen) {
-    if (seen.has(i.d)) continue;
-    seen.add(i.d);
-    unique.push(i);
+  for (const item of chosen) {
+    if (seen.has(item.d)) continue;
+    seen.add(item.d);
+
+    out.push({
+      ...item,
+      day: item.d,
+      date: new Date(year, monthIndex, item.d),
+      key: `${year}-${String(monthIndex + 1).padStart(2,'0')}-${String(item.d).padStart(2,'0')}`
+    });
   }
 
-  return unique;
+  return out;
 }
 
 function rowItems(items, y) {
@@ -829,75 +908,118 @@ function analyze(items,dsig,ocr,img) {
     }
   }
 
-  /* Grade de presença */
+  /* ================================================================
+   * GRADE DE PRESENÇA — MOTOR ORIENTADO POR DATA
+   * ================================================================
+   *
+   * A regra principal agora é:
+   *
+   *   1) mês + ano -> calendário real;
+   *   2) periodicidade -> datas previstas;
+   *   3) cabeçalho da lista -> número do dia;
+   *   4) P/A -> procura a DATA mais próxima, não "a coluna N";
+   *   5) toda conferência é feita usando a data completa (dd/mm/aaaa).
+   *
+   * Assim, se uma coluna estiver vazia, houver uma coluna extra ou o
+   * modelo terminar com "1" do mês seguinte, a data não é deslocada.
+   */
+
+  const calendario = buildCalendar(ano, mi, dias);
+  const previstas = calendario.filter(x => x.expected);
   const hdr = detectHeaderDays(items, mi, ano);
 
-  if (!hdr.length || new Set(hdr.map(i => i.s)).size < (ocr ? 10 : 18)) {
+  if (!hdr.length || hdr.length < Math.min(10, dim)) {
     add(
       'er',
-      'Não encontrei uma linha de cabeçalho com os dias do mês. Verifique se a tabela está legível.'
+      'Não encontrei o calendário diário completo da lista. O sistema precisa localizar os números das datas no cabeçalho antes de conferir P/A.'
     );
     return {C,I,A};
   }
 
-  const cx = {};
-  hdr.forEach(i => {
-    const d = Number(i.s);
-    if (!cx[d]) cx[d] = i.x + i.w/2;
-  });
+  /*
+   * Mapa de DATA -> posição X.
+   * A chave é a data real, e não o índice da coluna.
+   */
+  const posData = new Map();
 
-  const ds = Object.keys(cx).map(Number).sort((a,b) => a-b);
-
-  if (ds.length < 2) {
-    add('er','Não foi possível determinar a posição das colunas dos dias.');
-    return {C,I,A};
-  }
-
-  if (ocr && ds.length >= 2) {
-    /*
-     * OCR pode não reconhecer alguns números do cabeçalho.
-     * Só interpolamos posições para os dias que realmente pertencem
-     * ao mês analisado, nunca para 29/30/31 quando o mês não possui esses dias.
-     */
-    const P = ds.map(d => [d,cx[d]]);
-    const n = P.length;
-    const sx = P.reduce((a,q) => a+q[0],0);
-    const sy = P.reduce((a,q) => a+q[1],0);
-    const sxx = P.reduce((a,q) => a+q[0]*q[0],0);
-    const sxy = P.reduce((a,q) => a+q[0]*q[1],0);
-    const den = n*sxx-sx*sx;
-
-    if (den !== 0) {
-      const bb = (n*sxy-sx*sy)/den;
-      const a0 = (sy-bb*sx)/n;
-
-      for (let d=1; d<=dim; d++) {
-        if (!Object.prototype.hasOwnProperty.call(cx,d)) {
-          cx[d] = a0 + bb*d;
-        }
-      }
+  for (const h of hdr) {
+    if (!posData.has(h.key)) {
+      posData.set(h.key, h.x + h.w/2);
     }
   }
 
-  const allDays = Object.keys(cx).map(Number).filter(d => d >= 1 && d <= dim).sort((a,b) => a-b);
-  const mn = Math.min(...allDays);
-  const mx = Math.max(...allDays);
-  const spanDays = Math.max(1,mx-mn);
-  const sp = Math.abs(cx[mx]-cx[mn])/spanDays;
+  const datasCabecalho = [...posData.keys()]
+    .map(k => calendario.find(d => d.key === k))
+    .filter(Boolean);
 
-  if (!Number.isFinite(sp) || sp <= 0) {
-    add('er','Não foi possível determinar o espaçamento das colunas de presença.');
+  if (datasCabecalho.length < 5) {
+    add(
+      'er',
+      'O calendário foi localizado, mas poucas datas puderam ser vinculadas ao mês/ano da lista.'
+    );
     return {C,I,A};
   }
 
-  const L = cx[mn]-sp*0.65;
-  const R = cx[mx]+sp*0.65;
+  /*
+   * Espaçamento mediano entre as datas do cabeçalho.
+   * É usado somente para decidir se um P/A pertence a uma célula.
+   * A identidade da data continua vindo do calendário.
+   */
+  const xList = datasCabecalho
+    .map(d => posData.get(d.key))
+    .sort((a,b) => a-b);
+
+  const xGaps = [];
+  for (let i = 1; i < xList.length; i++) {
+    const g = xList[i] - xList[i-1];
+    if (g > 0) xGaps.push(g);
+  }
+
+  xGaps.sort((a,b) => a-b);
+  const sp = xGaps.length
+    ? xGaps[Math.floor(xGaps.length/2)]
+    : 0;
+
+  if (!Number.isFinite(sp) || sp <= 0) {
+    add('er','Não foi possível determinar o espaçamento real das células de data.');
+    return {C,I,A};
+  }
+
   const hy = Math.max(...hdr.map(i => i.y));
 
   /*
-   * Importante: em PDF.js o eixo Y cresce de baixo para cima. Em OCR
-   * também normalizamos para o mesmo sentido. Assim, linhas abaixo do
-   * cabeçalho têm Y menor.
+   * Localiza uma marcação e devolve a DATA, não o número da coluna.
+   */
+  function dataMaisProxima(xCenter) {
+    let melhor = null;
+    let distancia = Infinity;
+
+    for (const d of datasCabecalho) {
+      const x = posData.get(d.key);
+      const dx = Math.abs(x - xCenter);
+
+      if (dx < distancia) {
+        distancia = dx;
+        melhor = d;
+      }
+    }
+
+    /*
+     * Uma célula normalmente fica dentro de aproximadamente metade do
+     * espaçamento da coluna. Uma tolerância um pouco maior é necessária
+     * em OCR, mas nunca aceitamos uma marcação muito distante.
+     */
+    const limite = sp * (ocr ? 0.72 : 0.58);
+
+    return melhor && distancia <= limite
+      ? {data:melhor, distancia}
+      : null;
+  }
+
+  /*
+   * Interpretação das linhas de alunos.
+   * Mantemos a lógica geométrica apenas para descobrir qual linha é de
+   * qual aluno. A associação P/A -> data é feita pelo calendário.
    */
   const body = items
     .filter(i => i.y < hy-3)
@@ -918,7 +1040,7 @@ function analyze(items,dsig,ocr,img) {
   rows.forEach(r => {
     const nome = r.it
       .filter(i =>
-        i.x < L &&
+        i.x < (Math.min(...xList) - sp*0.35) &&
         !/^\d+$/.test(i.s) &&
         /[A-Za-zÀ-ÿ]/.test(i.s) &&
         !BAD.test(i.s)
@@ -936,59 +1058,111 @@ function analyze(items,dsig,ocr,img) {
 
     r.it.forEach(i => {
       const c = i.x + i.w/2;
-
-      if (c < L || c > R) return;
-
-      let d = allDays.reduce((a,b) =>
-        Math.abs(cx[b]-c) < Math.abs(cx[a]-c) ? b : a
-      );
-
-      if (Math.abs(cx[d]-c) > sp*0.6) return;
-
       const t = i.s.toUpperCase().trim();
 
+      /*
+       * Só P/A/"-" entram na conferência de presença.
+       * Primeiro identificamos a data pelo calendário.
+       */
+      if (!/^[PA]$|^[-–—_]$/.test(t)) {
+        if (!ocr && t.length <= 3 && /[A-Z]/.test(t)) {
+          const found = dataMaisProxima(c);
+          if (found) {
+            inv.push(
+              `${formatDateBR(ano,mi,found.data.day)} ("${i.s}")`
+            );
+          }
+        }
+        return;
+      }
+
+      const found = dataMaisProxima(c);
+
+      if (!found) return;
+
+      const key = found.data.key;
+
       if (/^[PA]$/.test(t)) {
-        mk[d] = t;
-      } else if (/^[-–—_]$/.test(t)) {
-        mk[d] = '-';
-      } else if (!ocr && t.length <= 3 && /[A-Z]/.test(t)) {
-        inv.push(`${dm(d)} ("${i.s}")`);
+        mk[key] = {
+          status:t,
+          day:found.data.day,
+          date:found.data.date,
+          key
+        };
+      } else {
+        mk[key] = {
+          status:'-',
+          day:found.data.day,
+          date:found.data.date,
+          key
+        };
       }
     });
 
-    const falta = aula
-      .filter(d => !mk[d])
-      .map(dm);
+    /*
+     * Dias previstos pelo calendário que realmente possuem algum P/A.
+     */
+    const datasComRegistro = Object.values(mk)
+      .filter(v => v.status === 'P' || v.status === 'A')
+      .map(v => v.day)
+      .sort((a,b) => a-b);
 
-    const fora = Object.keys(mk)
-      .map(Number)
-      .filter(d => !aula.includes(d) && mk[d] !== '-')
-      .map(d => `${dm(d)} (${mk[d]})`);
+    const previstasSemRegistro = previstas
+      .filter(d => !mk[d.key])
+      .map(d => d.day);
+
+    const foraDoCalendario = Object.values(mk)
+      .filter(v => !previstas.some(d => d.key === v.key) && v.status !== '-')
+      .map(v => v.day)
+      .sort((a,b) => a-b);
 
     if (!Object.keys(mk).length) {
       erros.push('sem nenhum registro de presença identificado');
-    } else if (falta.length) {
-      erros.push('dia(s) de aula sem P/A: ' + falta.join(', '));
     }
 
-    if (fora.length) {
-      erros.push('marcação em dia sem aula: ' + fora.join(', '));
+    /*
+     * Aqui está a mudança principal:
+     * não comparamos "quantidade de colunas" com "quantidade de aulas".
+     * Comparamos DATA prevista x DATA encontrada.
+     */
+    /*
+     * Não marcamos automaticamente cada aluno como erro quando uma data
+     * prevista está sem qualquer registro na lista inteira. Isso pode
+     * representar cancelamento, feriado ou ausência de aula naquele dia.
+     * A ocorrência é tratada no resumo global.
+     */
+
+    if (foraDoCalendario.length) {
+      erros.push(
+        'marcação em data que não corresponde à periodicidade: ' +
+        foraDoCalendario.map(d => formatDateBR(ano,mi,d)).join(', ')
+      );
     }
 
     if (inv.length) {
-      erros.push('caractere inválido (use P ou A): ' + inv.join(', '));
+      erros.push(
+        'caractere inválido (use P ou A): ' + inv.join(', ')
+      );
     }
 
+    /*
+     * Totais impressos.
+     * Eles ficam depois da grade e são lidos somente como números fora
+     * da faixa de datas; portanto não interferem na identificação das
+     * datas.
+     */
+    const maxXData = Math.max(...xList);
     const nums = r.it
       .filter(i =>
-        i.x+i.w/2 > R &&
+        i.x+i.w/2 > maxXData + sp*0.45 &&
         /^\d+$/.test(i.s)
       )
       .sort((a,b) => a.x-b.x)
       .map(i => Number(i.s));
 
-    const cA = Object.values(mk).filter(v => v === 'A').length;
-    const cP = Object.values(mk).filter(v => v === 'P').length;
+    const cA = Object.values(mk).filter(v => v.status === 'A').length;
+    const cP = Object.values(mk).filter(v => v.status === 'P').length;
+    const cDash = Object.values(mk).filter(v => v.status === '-').length;
 
     if (
       nums.length >= 2 &&
@@ -1006,11 +1180,66 @@ function analyze(items,dsig,ocr,img) {
       erros,
       p:cP,
       a:cA,
-      dash:Object.values(mk).filter(v => v === '-').length,
-      blank:falta.length,
+      dash:cDash,
+      blank:previstasSemRegistro.length,
       mk
     });
   });
+
+  /*
+   * Resumo global baseado no CALENDÁRIO, não na posição das colunas.
+   */
+  const registroGlobal = new Map();
+
+  for (const aluno of A) {
+    for (const v of Object.values(aluno.mk)) {
+      const key = v.key;
+
+      if (!registroGlobal.has(key)) {
+        registroGlobal.set(key, []);
+      }
+
+      registroGlobal.get(key).push(v.status);
+    }
+  }
+
+  const datasComPresenca = [...registroGlobal.keys()]
+    .map(k => calendario.find(d => d.key === k))
+    .filter(Boolean)
+    .sort((a,b) => a.day-b.day);
+
+  const datasPrevistasSemRegistroGlobal = previstas.filter(d =>
+    !registroGlobal.has(d.key)
+  );
+
+  add(
+    'ok',
+    'Calendário de ' + MES[mi] + '/' + ano + ': ' +
+    previstas.map(d => formatDateBR(ano,mi,d.day)).join(', ')
+  );
+
+  add(
+    datasComPresenca.length
+      ? 'ok'
+      : 'er',
+    'Datas que possuem P/A na lista: ' +
+    (datasComPresenca.length
+      ? datasComPresenca.map(d => formatDateBR(ano,mi,d.day)).join(', ')
+      : 'nenhuma')
+  );
+
+  if (datasPrevistasSemRegistroGlobal.length) {
+    add(
+      'wa',
+      'Datas previstas pelo calendário sem P/A registrado: ' +
+      datasPrevistasSemRegistroGlobal
+        .map(d => formatDateBR(ano,mi,d.day))
+        .join(', ') +
+      '. O sistema NÃO desloca essas marcações para outra coluna.'
+    );
+  } else {
+    add('ok','Todas as datas previstas pelo calendário possuem registro P/A.');
+  }
 
   if (!A.length) {
     add('er','Não encontrei alunos/registros de presença na grade.');
@@ -1019,48 +1248,204 @@ function analyze(items,dsig,ocr,img) {
      * "Dias previstos em branco" só deve considerar ausência de P/A.
      * Um "-" em toda a lista é tratado como dia sem aula.
      */
-    const dsh = aula.filter(d =>
-      A.every(x => x.mk[d] === '-')
+    const dsh = previstas.filter(d =>
+      A.length > 0 &&
+      A.every(x => x.mk[d.key]?.status === '-')
     );
 
-    const bln = aula.filter(d =>
-      A.some(x => !x.mk[d])
+    const bln = previstas.filter(d =>
+      A.some(x => !x.mk[d.key])
     );
 
-    const mis = aula.filter(d =>
-      A.some(x => x.mk[d] === '-') &&
-      A.some(x => x.mk[d] === 'P' || x.mk[d] === 'A')
+    const mis = previstas.filter(d =>
+      A.some(x => x.mk[d.key]?.status === '-') &&
+      A.some(x =>
+        x.mk[d.key]?.status === 'P' ||
+        x.mk[d.key]?.status === 'A'
+      )
     );
 
     const lst = a => a.length
-      ? ' (' + a.map(dm).join(', ') + ')'
+      ? ' (' + a.map(d => formatDateBR(ano,mi,d.day)).join(', ') + ')'
       : '';
 
     add(
       'ok',
-      'Dias previstos marcados com "-" para todos: ' +
+      'Datas previstas marcadas com "-" para todos: ' +
       dsh.length + lst(dsh)
     );
 
+    /*
+     * "Em branco" agora significa exatamente:
+     * a data estava prevista no calendário, mas não existe P/A para
+     * nenhum aluno naquela data.
+     */
     add(
-      bln.length ? 'er' : 'ok',
-      'Dias previstos em branco: ' +
+      bln.length ? 'wa' : 'ok',
+      'Datas previstas sem P/A para algum aluno: ' +
       bln.length + lst(bln)
     );
 
     if (mis.length) {
       add(
         'wa',
-        'Dia(s) com "-" para alguns alunos e P/A para outros: ' +
-        mis.map(dm).join(', ')
+        'Data(s) com "-" para alguns alunos e P/A para outros: ' +
+        mis.map(d => formatDateBR(ano,mi,d)).join(', ')
       );
     }
   }
 
-  return {C,I,A};
+  return {
+    C,
+    I,
+    A,
+    calendario,
+    previstas,
+    referencia: {mes: mi, ano}
+  };
+}
+
+
+function weekdayShort(n) {
+  return ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'][n];
+}
+
+function dateBRFromKey(key) {
+  const m = String(key || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? `${m[3]}/${m[2]}/${m[1]}` : key;
+}
+
+function calendarEvidence(r) {
+  const alunos = r.A || [];
+  const previstas = r.previstas || [];
+  const calendario = r.calendario || [];
+
+  if (!previstas.length) return '';
+
+  const rows = previstas.map(d => {
+    const vals = alunos
+      .map(a => a.mk?.[d.key]?.status || '')
+      .filter(Boolean);
+
+    const p = vals.filter(v => v === 'P').length;
+    const a = vals.filter(v => v === 'A').length;
+    const dash = vals.filter(v => v === '-').length;
+    const blank = Math.max(0, alunos.length - vals.length);
+
+    let status = 'ok';
+    let label = 'Registrada';
+
+    if (!alunos.length) {
+      status = 'wa';
+      label = 'Sem alunos identificados';
+    } else if (blank === alunos.length) {
+      status = 'er';
+      label = 'Sem P/A';
+    } else if (blank > 0) {
+      status = 'wa';
+      label = 'Parcial';
+    } else if (dash === alunos.length) {
+      status = 'wa';
+      label = '“-” para todos';
+    }
+
+    return `
+      <tr>
+        <td><b>${esc(formatDateBR(r.referencia.ano,r.referencia.mes,d.day))}</b></td>
+        <td>${weekdayShort(d.weekday)}</td>
+        <td><span class="pill expected">SIM</span></td>
+        <td>${p}</td>
+        <td>${a}</td>
+        <td>${dash}</td>
+        <td>${blank}</td>
+        <td><span class="pill ${status}">${label}</span></td>
+      </tr>`;
+  }).join('');
+
+  return `
+    <div class="sec calendar-sec">
+      <h3>Calendário real usado na conferência</h3>
+      <p class="date-note">
+        As datas abaixo foram calculadas a partir de <b>${esc(MES[r.referencia.mes])}/${r.referencia.ano}</b>
+        e da periodicidade da lista. A posição da coluna não define a data.
+      </p>
+      <div class="table-wrap">
+        <table class="calendar-table">
+          <thead>
+            <tr>
+              <th>Data</th>
+              <th>Dia</th>
+              <th>Prevista</th>
+              <th>P</th>
+              <th>A</th>
+              <th>-</th>
+              <th>Em branco</th>
+              <th>Situação</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function studentMatrix(r) {
+  const alunos = r.A || [];
+  const previstas = r.previstas || [];
+
+  if (!alunos.length || !previstas.length) return '';
+
+  const head = previstas.map(d =>
+    `<th title="${esc(formatDateBR(r.referencia.ano,r.referencia.mes,d.day))}">
+      ${String(d.day).padStart(2,'0')}<small>${weekdayShort(d.weekday)}</small>
+    </th>`
+  ).join('');
+
+  const body = alunos.map(a => {
+    const cells = previstas.map(d => {
+      const v = a.mk?.[d.key];
+      const st = v?.status || '';
+      const cls = st === 'P' ? 'present'
+        : st === 'A' ? 'absent'
+        : st === '-' ? 'dash'
+        : 'blank';
+
+      return `<td class="${cls}" title="${esc(formatDateBR(r.referencia.ano,r.referencia.mes,d.day))}">
+        ${st || '·'}
+      </td>`;
+    }).join('');
+
+    return `<tr>
+      <th class="student-name">${esc(a.nome)}</th>
+      ${cells}
+      <td class="student-total">${a.p}/${a.a}</td>
+    </tr>`;
+  }).join('');
+
+  return `
+    <div class="sec">
+      <h3>Matriz de conferência por aluno</h3>
+      <p class="date-note">
+        <b>P</b> = presença · <b>A</b> = ausência · <b>-</b> = marcado como sem aula ·
+        <b>·</b> = nenhuma marcação encontrada para aquela data.
+      </p>
+      <div class="table-wrap">
+        <table class="matrix">
+          <thead>
+            <tr>
+              <th class="student-name">Aluno</th>
+              ${head}
+              <th>Total<br>P/A</th>
+            </tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+    </div>`;
 }
 
 function render(name,r) {
+
   const bad =
     r.C.some(c => c.t === 'er') ||
     r.A.some(a => a.erros.length);
@@ -1119,6 +1504,9 @@ function render(name,r) {
         '</ul>' +
       '</div>';
   }
+
+  h += calendarEvidence(r);
+  h += studentMatrix(r);
 
   h +=
     '<div class="sec">' +
