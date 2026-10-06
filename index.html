@@ -575,7 +575,18 @@ function detectHeaderDays(items, monthIndex, year) {
 
     group.forEach(i => {
       const old = byDay.get(i.d);
-      if (!old || i.w > old.w) byDay.set(i.d, i);
+
+      /*
+       * Algumas listas terminam o calendário com o primeiro dia do
+       * mês seguinte. Ex.: junho aparece como 1..30,1.
+       *
+       * Se fizermos a escolha apenas pela largura do texto, o "1"
+       * final pode substituir o "1" verdadeiro e deslocar TODAS as
+       * colunas de presença. Para números repetidos, mantemos sempre
+       * o que estiver mais à esquerda, pois o cabeçalho do mês é
+       * montado da esquerda para a direita.
+       */
+      if (!old || i.cx < old.cx) byDay.set(i.d, i);
     });
 
     const days = [...byDay.keys()].sort((a,b) => a-b);
@@ -648,7 +659,27 @@ function detectHeaderDays(items, monthIndex, year) {
     .map(scoreGroup)
     .sort((a,b) => b.score-a.score);
 
-  return ranked[0] ? ranked[0].group : [];
+  if (!ranked[0]) return [];
+
+  /*
+   * Depois de escolher a linha correta, reconstruímos a sequência
+   * esperada 1..último dia do mês. Isso elimina o "1" do mês seguinte
+   * que aparece em alguns modelos de lista (como junho: 1..30,1).
+   */
+  const chosen = ranked[0].group
+    .filter(i => i.d >= 1 && i.d <= maxDay)
+    .sort((a,b) => a.d-b.d || a.cx-b.cx);
+
+  const unique = [];
+  const seen = new Set();
+
+  for (const i of chosen) {
+    if (seen.has(i.d)) continue;
+    seen.add(i.d);
+    unique.push(i);
+  }
+
+  return unique;
 }
 
 function rowItems(items, y) {
