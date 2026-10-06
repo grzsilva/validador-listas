@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Conferência de listas de presença</title>
+<style>
+:root{--bg:#f3f6f7;--cd:#fff;--tx:#17262b;--mu:#5b6b72;--bd:#d6dfe2;--ac:#0f6e7a;--ok:#146c3b;--okb:#d9f2e3;--er:#a61b1b;--erb:#fbe0e0;--wa:#8a5a00;--wab:#fcefc7;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1719;--cd:#182326;--tx:#e6eef0;--mu:#93a5ab;--bd:#2b3a3f;--ac:#4cc3d1;--ok:#6fdc9c;--okb:#12341f;--er:#ff8d8d;--erb:#3a1717;--wa:#f5c451;--wab:#3a2d0b}}
+:root[data-theme="dark"]{--bg:#0f1719;--cd:#182326;--tx:#e6eef0;--mu:#93a5ab;--bd:#2b3a3f;--ac:#4cc3d1;--ok:#6fdc9c;--okb:#12341f;--er:#ff8d8d;--erb:#3a1717;--wa:#f5c451;--wab:#3a2d0b}
+*{box-sizing:border-box}html,body{margin:0}
+body{background:var(--bg);color:var(--tx);font:16px/1.5 Georgia,"Times New Roman",serif}
+main{max-width:760px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:1.6rem;line-height:1.2;margin:8px 0 6px}
+p.s{color:var(--mu);margin:0 0 18px;font-family:system-ui,sans-serif;font-size:.95rem}
+label.dz{display:block;border:2px dashed var(--ac);border-radius:10px;padding:26px 16px;text-align:center;cursor:pointer;background:var(--cd);font-family:system-ui,sans-serif}
+label.dz:focus-within{outline:3px solid var(--ac)}
+label.dz input{position:absolute;opacity:0;width:1px;height:1px}
+label.dz b{color:var(--ac)}
+.card{background:var(--cd);border:1px solid var(--bd);border-radius:10px;margin-top:16px;overflow:hidden;font-family:system-ui,sans-serif}
+.hd{padding:14px 16px;border-bottom:1px solid var(--bd)}
+.hd h2{font:700 1rem Georgia,serif;margin:0 0 4px;word-break:break-word}
+.bg{display:inline-block;padding:2px 10px;border-radius:99px;font-weight:700;font-size:.85rem}
+.ok{background:var(--okb);color:var(--ok)}.er{background:var(--erb);color:var(--er)}.wa{background:var(--wab);color:var(--wa)}
+dl{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;margin:10px 0 0;font-size:.9rem}dt{color:var(--mu)}dd{margin:0}
+.sec{padding:12px 16px;border-bottom:1px solid var(--bd)}.sec:last-child{border:0}
+.sec h3{font-size:.95rem;margin:0 0 6px}
+ul{margin:0;padding:0;list-style:none}
+li{padding:3px 0 3px 26px;position:relative;font-size:.92rem}
+li:before{position:absolute;left:0;font-weight:700}
+li.ok:before{content:"✔";color:var(--ok)}li.er:before{content:"✘";color:var(--er)}li.wa:before{content:"!";color:var(--wa);left:6px}
+li.ok,li.er,li.wa{background:none}
+</style></head><body><main>
+<h1>Conferência de listas de presença</h1>
+<p class="s">Envie o PDF da lista. Confere P/A nos dias da periodicidade e se instrutor e coordenador assinaram. A análise roda no seu navegador: nada é enviado nem salvo.</p>
+<label class="dz"><input id="f" type="file" accept="application/pdf" multiple><b>Escolher PDFs</b> ou arrastar para cá</label>
+<div id="out"></div></main>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+const MES=['janeiro','fevereiro','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+const DIA={domingo:0,segunda:1,terca:2,quarta:3,quinta:4,sexta:5,sabado:6};
+const NS=['domingo','segunda','terça','quarta','quinta','sexta','sábado'];
+const BAD=/instrutor|coordenador|coord\.|assinad|verifique|documento|data:|gov|_{3}/i;
+const norm=s=>(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const dm=d=>String(d).padStart(2,'0');
+async function extract(file){
+  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  const tc=await (await pdf.getPage(1)).getTextContent();
+  return tc.items.map(i=>({s:i.str.trim(),x:i.transform[4],y:i.transform[5],w:i.width})).filter(i=>i.s);
+}
+function val(items,re){
+  let l,m;const c=items.filter(i=>re.test(i.s)).sort((a,b)=>b.y-a.y);l=c[0];if(!l)return '';
+  m=re.exec(l.s);if(m[1])return m[1].trim();
+  const n=items.filter(i=>i!==l&&Math.abs(i.y-l.y)<4&&i.x>l.x+l.w-2).sort((a,b)=>a.x-b.x)[0];
+  return n?n.s:'';
+}
+function analyze(items){
+  const C=[],A=[],I={};
+  const add=(t,m)=>C.push({t,m});
+  const mi=items.map(i=>MES.indexOf(norm(i.s))).find(m=>m>=0);
+  const ano=+((items.find(i=>/^20\d\d$/.test(i.s))||{}).s);
+  I.Núcleo=val(items,/^n[uú]cleo:\s*(.*)$/i);I.Turma=val(items,/^turma:\s*(.*)$/i);
+  const prof=val(items,/^professor:\s*(.*)$/i),coord=val(items,/^coordenador:\s*(.*)$/i);
+  I.Professor=prof;I.Coordenador=coord;I.Horário=val(items,/^hor[aá]rio:?\s*(.*)$/i);
+  const per=val(items,/^periodicidade:?\s*(.*)$/i);I.Periodicidade=per;
+  if(mi==null||!ano)return{C:[{t:'er',m:'Não encontrei o mês/ano de referência na lista.'}],I,A};
+  I.Mês=MES[mi]+'/'+ano;
+  const dias=Object.keys(DIA).filter(k=>norm(per).includes(k)).map(k=>DIA[k]);
+  const q=/(\d+)\s*vez/.exec(norm(per));
+  if(!dias.length)return{C:[{t:'er',m:'Não consegui ler os dias da semana na periodicidade ("'+per+'").'}],I,A};
+  if(q&&+q[1]!==dias.length)add('er','Periodicidade inconsistente: informa '+(+q[1])+' vez(es) por semana, mas lista '+dias.length+' dia(s).');
+  else add('ok','Periodicidade: '+dias.map(d=>NS[d]).join(' e '));
+  const dim=new Date(ano,mi+1,0).getDate();
+  const aula=[];for(let d=1;d<=dim;d++)if(dias.includes(new Date(ano,mi,d).getDay()))aula.push(d);
+  add('ok','Dias de aula em '+I.Mês+': '+aula.join(', ')+' ('+aula.length+' aulas)');
+  // assinaturas
+  const sig=items.filter(i=>/^data:\s*\d{2}\/\d{2}\/\d{4}/i.test(i.s)).map(d=>{
+    const n=items.filter(i=>Math.abs(i.x-d.x)<10&&i.y>d.y+3&&i.y<d.y+26&&!/documento|assinad|data:|verifique/i.test(i.s)).sort((a,b)=>a.y-b.y)[0];
+    return{nome:n?n.s:'?',data:d.s.slice(6,16)};
+  });
+  if(!sig.length)add('er','Nenhuma assinatura digital (gov.br) encontrada.');
+  else{
+    const has=n=>sig.some(s=>{const a=norm(s.nome),b=norm(n);return b&&(a===b||a.includes(b)||b.includes(a))});
+    [['Instrutor',prof],['Coordenador',coord]].forEach(([r,n])=>has(n)?add('ok',r+' assinou: '+n):add('er',r+' do cabeçalho ('+(n||'não lido')+') não consta entre os signatários.'));
+    const out=sig.filter(s=>![prof,coord].some(n=>n&&(norm(s.nome).includes(norm(n))||norm(n).includes(norm(s.nome)))));
+    if(out.length)add('wa','Outros signatários (não conferidos): '+out.map(s=>s.nome+' em '+s.data).join('; '));
+  }
+  // grade de dias
+  const g={};items.forEach(i=>{if(/^\d{1,2}$/.test(i.s)&&+i.s>=1&&+i.s<=31)(g[Math.round(i.y/3)]=g[Math.round(i.y/3)]||[]).push(i)});
+  const hdr=Object.values(g).sort((a,b)=>new Set(b.map(i=>i.s)).size-new Set(a.map(i=>i.s)).size)[0];
+  if(!hdr||new Set(hdr.map(i=>i.s)).size<28){add('er','Não encontrei a linha dos dias do mês.');return{C,I,A};}
+  const cx={};hdr.forEach(i=>cx[+i.s]=i.x+i.w/2);
+  const ds=Object.keys(cx).map(Number),mn=Math.min(...ds),mx=Math.max(...ds),sp=(cx[mx]-cx[mn])/(mx-mn);
+  const L=cx[mn]-sp*.6,R=cx[mx]+sp*.6,hy=hdr[0].y;
+  const body=items.filter(i=>i.y<hy-3).sort((a,b)=>b.y-a.y),rows=[];
+  body.forEach(i=>{const r=rows[rows.length-1];if(r&&Math.abs(r.y-i.y)<3.5)r.it.push(i);else rows.push({y:i.y,it:[i]})});
+  rows.forEach(r=>{
+    const nome=r.it.filter(i=>i.x<L&&!/^\d+$/.test(i.s)&&/[a-zà-ÿ]/.test(i.s)&&!BAD.test(i.s)).sort((a,b)=>a.x-b.x).map(i=>i.s.replace(/^\d+\s+/,'')).join(' ').trim();
+    if(!nome)return;
+    const mk={},inv=[],erros=[];
+    r.it.forEach(i=>{const c=i.x+i.w/2;if(c<L||c>R)return;
+      let d=ds.reduce((a,b)=>Math.abs(cx[b]-c)<Math.abs(cx[a]-c)?b:a);
+      if(Math.abs(cx[d]-c)>sp*.6)return;
+      if(/^[PA]$/.test(i.s))mk[d]=i.s;else inv.push(dm(d)+' ("'+i.s+'")')});
+    const falta=aula.filter(d=>!mk[d]).map(dm),fora=Object.keys(mk).map(Number).filter(d=>!aula.includes(d)).map(d=>dm(d)+' ('+mk[d]+')');
+    if(!Object.keys(mk).length)erros.push('sem nenhum registro no mês');
+    else{if(falta.length)erros.push('dia(s) de aula sem P/A: '+falta.join(', '));}
+    if(fora.length)erros.push('marcação em dia sem aula: '+fora.join(', '));
+    if(inv.length)erros.push('caractere inválido (use P ou A): '+inv.join(', '));
+    const nums=r.it.filter(i=>i.x+i.w/2>R&&/^\d+$/.test(i.s)).sort((a,b)=>a.x-b.x).map(i=>+i.s);
+    const cA=Object.values(mk).filter(v=>v==='A').length,cP=Object.values(mk).filter(v=>v==='P').length;
+    if(nums.length>=2&&(nums[0]!==cA||nums[1]!==cP))erros.push('totais impressos (A '+nums[0]+' / P '+nums[1]+') diferem do contado (A '+cA+' / P '+cP+')');
+    A.push({nome,erros});
+  });
+  if(!A.length)add('er','Não encontrei alunos na lista.');
+  return{C,I,A};
+}
+function render(name,r){
+  const bad=r.C.some(c=>c.t==='er')||r.A.some(a=>a.erros.length);
+  const warn=r.C.some(c=>c.t==='wa');
+  const st=bad?['er','Com erros']:warn?['wa','Correta, com avisos']:['ok','Correta'];
+  const nErr=r.A.filter(a=>a.erros.length).length;
+  let h='<div class="card"><div class="hd"><h2>'+esc(name)+'</h2><span class="bg '+st[0]+'">'+st[1]+'</span><dl>'+
+    Object.entries(r.I).filter(([,v])=>v).map(([k,v])=>'<dt>'+k+'</dt><dd>'+esc(v)+'</dd>').join('')+'</dl></div>';
+  h+='<div class="sec"><h3>Periodicidade e assinaturas</h3><ul>'+r.C.map(c=>'<li class="'+c.t+'">'+esc(c.m)+'</li>').join('')+'</ul></div>';
+  if(r.A.length)h+='<div class="sec"><h3>Alunos ('+r.A.length+' lidos, '+nErr+' com problema)</h3><ul>'+
+    r.A.map(a=>a.erros.length?'<li class="er"><b>'+esc(a.nome)+'</b>: '+esc(a.erros.join('; '))+'</li>':'<li class="ok">'+esc(a.nome)+'</li>').join('')+'</ul></div>';
+  return h+'</div>';
+}
+async function run(files){
+  const out=document.getElementById('out');out.innerHTML='';
+  for(const f of files){
+    const box=document.createElement('div');out.appendChild(box);
+    try{
+      const items=await extract(f);
+      if(!items.length)throw new Error('PDF sem texto (provavelmente digitalizado). Envie o PDF gerado direto da planilha.');
+      box.innerHTML=render(f.name,analyze(items));
+    }catch(e){box.innerHTML='<div class="card"><div class="hd"><h2>'+esc(f.name)+'</h2><span class="bg er">Não foi possível ler</span><p>'+esc(e.message)+'</p></div></div>'}
+  }
+}
+const fi=document.getElementById('f');
+fi.addEventListener('change',()=>run([...fi.files]));
+const dz=document.querySelector('.dz');
+dz.addEventListener('dragover',e=>e.preventDefault());
+dz.addEventListener('drop',e=>{e.preventDefault();run([...e.dataTransfer.files].filter(f=>/pdf$/i.test(f.type||f.name)))});
+</script></body></html>
