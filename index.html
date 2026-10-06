@@ -530,27 +530,125 @@ function extractPeriodDays(per) {
   return {days,frequency:q ? Number(q[1]) : null};
 }
 
-function detectHeaderDays(items) {
+function detectHeaderDays(items, monthIndex, year) {
+  /*
+   * A versão anterior escolhia simplesmente a linha com mais números.
+   * Isso é perigoso porque uma lista pode ter números de matrícula,
+   * totais, telefones, horários etc.
+   *
+   * Agora procuramos uma sequência horizontal de dias. A pontuação
+   * privilegia:
+   *   1. números válidos para o mês/ano;
+   *   2. sequência crescente;
+   *   3. proximidade horizontal regular;
+   *   4. quantidade de dias encontrados.
+   */
+  const maxDay = (monthIndex != null && year)
+    ? new Date(year, monthIndex + 1, 0).getDate()
+    : 31;
+
+  const nums = items
+    .filter(i => /^\d{1,2}$/.test(String(i.s).trim()))
+    .map(i => ({
+      ...i,
+      d:Number(String(i.s).trim()),
+      cx:i.x + (i.w || 0)/2
+    }))
+    .filter(i => i.d >= 1 && i.d <= maxDay);
+
+  if (!nums.length) return [];
+
   const groups = new Map();
 
-  for (const i of items) {
-    if (!/^\d{1,2}$/.test(i.s)) continue;
-    const d = Number(i.s);
-    if (d < 1 || d > 31) continue;
-
-    const key = Math.round(i.y/3);
-    if (!groups.has(key)) groups.set(key,[]);
+  nums.forEach(i => {
+    /*
+     * Em PDF a mesma linha costuma ter Y praticamente igual.
+     * No OCR existe mais variação, por isso usamos uma tolerância maior.
+     */
+    const key = Math.round(i.y / 5) * 5;
+    if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(i);
-  }
+  });
 
-  const candidates = [...groups.values()]
-    .sort((a,b) => {
-      const sa = new Set(a.map(i => i.s)).size;
-      const sb = new Set(b.map(i => i.s)).size;
-      return sb-sa;
+  function scoreGroup(group) {
+    const byDay = new Map();
+
+    group.forEach(i => {
+      const old = byDay.get(i.d);
+      if (!old || i.w > old.w) byDay.set(i.d, i);
     });
 
-  return candidates[0] || [];
+    const days = [...byDay.keys()].sort((a,b) => a-b);
+
+    if (days.length < 3) return {score:-Infinity, group:[]};
+
+    let consecutive = 0;
+    let gaps = 0;
+
+    for (let i=1; i<days.length; i++) {
+      const diff = days[i] - days[i-1];
+      if (diff === 1) consecutive++;
+      else gaps += Math.min(diff - 1, 5);
+    }
+
+    const points = [...byDay.values()].sort((a,b) => a.cx-b.cx);
+
+    let regularity = 0;
+    if (points.length >= 3) {
+      const gapsX = [];
+      for (let i=1; i<points.length; i++) {
+        const dx = points[i].cx - points[i-1].cx;
+        if (dx > 0) gapsX.push(dx);
+      }
+
+      if (gapsX.length) {
+        const avg = gapsX.reduce((a,b) => a+b,0) / gapsX.length;
+        const variance = gapsX.reduce((a,b) => a + Math.pow(b-avg,2),0) / gapsX.length;
+        const cv = avg ? Math.sqrt(variance)/avg : 1;
+        regularity = Math.max(0, 20 - cv*20);
+      }
+    }
+
+    /*
+     * Bônus forte para começar em 1. Em uma lista mensal, o cabeçalho
+     * normalmente começa no dia 1 e segue 2, 3, 4...
+     */
+    const startsAtOne = days[0] === 1 ? 35 : 0;
+
+    /*
+     * Bônus para a maior sequência consecutiva encontrada.
+     */
+    let longest = days.length ? 1 : 0;
+    let current = days.length ? 1 : 0;
+
+    for (let i=1; i<days.length; i++) {
+      if (days[i] === days[i-1] + 1) {
+        current++;
+        longest = Math.max(longest,current);
+      } else {
+        current = 1;
+      }
+    }
+
+    const score =
+      days.length * 10 +
+      consecutive * 18 +
+      longest * 15 +
+      regularity +
+      startsAtOne -
+      gaps * 8;
+
+    return {
+      score,
+      group:points
+    };
+  }
+
+  const ranked = [...groups.values()]
+    .map(scoreGroup)
+    .sort((a,b) => b.score-a.score);
+
+  return ranked[0] ? ranked[0].group : [];
 }
 
 function rowItems(items, y) {
@@ -701,7 +799,7 @@ function analyze(items,dsig,ocr,img) {
   }
 
   /* Grade de presença */
-  const hdr = detectHeaderDays(items);
+  const hdr = detectHeaderDays(items, mi, ano);
 
   if (!hdr.length || new Set(hdr.map(i => i.s)).size < (ocr ? 10 : 18)) {
     add(
@@ -724,7 +822,12 @@ function analyze(items,dsig,ocr,img) {
     return {C,I,A};
   }
 
-  if (ocr) {
+  if (ocr && ds.length >= 2) {
+    /*
+     * OCR pode não reconhecer alguns números do cabeçalho.
+     * Só interpolamos posições para os dias que realmente pertencem
+     * ao mês analisado, nunca para 29/30/31 quando o mês não possui esses dias.
+     */
     const P = ds.map(d => [d,cx[d]]);
     const n = P.length;
     const sx = P.reduce((a,q) => a+q[0],0);
@@ -736,11 +839,16 @@ function analyze(items,dsig,ocr,img) {
     if (den !== 0) {
       const bb = (n*sxy-sx*sy)/den;
       const a0 = (sy-bb*sx)/n;
-      for (let d=1; d<=dim; d++) cx[d] = a0+bb*d;
+
+      for (let d=1; d<=dim; d++) {
+        if (!Object.prototype.hasOwnProperty.call(cx,d)) {
+          cx[d] = a0 + bb*d;
+        }
+      }
     }
   }
 
-  const allDays = Object.keys(cx).map(Number).sort((a,b) => a-b);
+  const allDays = Object.keys(cx).map(Number).filter(d => d >= 1 && d <= dim).sort((a,b) => a-b);
   const mn = Math.min(...allDays);
   const mx = Math.max(...allDays);
   const spanDays = Math.max(1,mx-mn);
