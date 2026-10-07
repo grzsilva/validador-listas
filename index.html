@@ -89,6 +89,14 @@ button:hover{border-color:var(--ac)}
 .matrix td.dash{background:rgba(150,150,150,.13);color:var(--mu)}
 .matrix td.blank{background:rgba(220,160,0,.10);color:#a06b00}
 .student-total{font-weight:800;position:sticky;right:0;background:var(--card)}
+.dup-grid,.check-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-top:10px}
+.alert-box{border:1px solid var(--bd);border-radius:10px;padding:10px 12px;background:var(--bg)}
+.alert-box strong{display:block;margin-bottom:4px}
+.alert-box.er{background:var(--erb);color:var(--er)}
+.alert-box.wa{background:var(--wab);color:var(--wa)}
+.alert-box.ok{background:var(--okb);color:var(--ok)}
+.badge{display:inline-block;border:1px solid var(--bd);border-radius:999px;padding:2px 8px;font-size:.75rem;font-weight:700;margin:2px}
+
 @media(max-width:800px){
   .calendar-table,.matrix{font-size:.78rem}
   .calendar-table th,.calendar-table td,.matrix th,.matrix td{padding:6px 5px}
@@ -109,7 +117,7 @@ button:hover{border-color:var(--ac)}
   <h1>Conferência de listas de presença</h1>
   <p class="s">
     Envie o PDF ou a imagem (foto/print) da lista. O sistema confere P/A nos dias da
-    periodicidade e verifica as assinaturas digitais quando disponíveis. A análise
+    periodicidade, compara beneficiários entre blocos/turmas, valida o cabeçalho e calcula a carga horária. A análise
     acontece no seu navegador: os arquivos não são enviados nem salvos por este sistema.
   </p>
 
@@ -871,6 +879,333 @@ function rowItems(items, y) {
     .sort((a,b) => a.x-b.x);
 }
 
+
+/* ================================================================
+ * VALIDAÇÕES E CARGA HORÁRIA
+ * ================================================================ */
+
+function parseTimeToMinutes(s) {
+  const m = String(s || '').match(/\b([01]?\d|2[0-3])\s*[:hH]\s*([0-5]\d)\b/);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+function formatHours(minutes) {
+  if (!Number.isFinite(minutes)) return '';
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (!m) return `${h}h`;
+  return `${h}h${String(m).padStart(2,'0')}`;
+}
+
+function parseScheduleDuration(horario) {
+  const s = String(horario || '').replace(/[–—−]/g,'-');
+  const times = [...s.matchAll(/\b([01]?\d|2[0-3])\s*[:hH]\s*([0-5]\d)\b/g)]
+    .map(m => Number(m[1])*60 + Number(m[2]));
+  if (times.length < 2) return null;
+
+  let start = times[0], end = times[1];
+  if (end < start) end += 24*60;
+  const duration = end - start;
+  return duration > 0 && duration <= 12*60 ? duration : null;
+}
+
+function readHeaderField(items, labels) {
+  const re = new RegExp(
+    '^(' + labels.map(x => x.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')).join('|') + ')\\s*:?\\s*(.*)$',
+    'i'
+  );
+  const hit = items.filter(i => re.test(String(i.s || '').trim()))
+    .sort((a,b) => b.y-a.y)[0];
+  if (!hit) return '';
+  const m = String(hit.s).match(re);
+  return m ? m[2].trim() : '';
+}
+
+function validateHeader(items, mi, ano, dias, hdr, horario, periodicidade, turma) {
+  const checks = [];
+  const add = (t,m) => checks.push({t,m});
+
+  if (mi == null || !ano) {
+    add('er','Cabeçalho: mês/ano de referência não identificado.');
+    return checks;
+  }
+
+  if (!dias.length) {
+    add('er','Cabeçalho: periodicidade sem dias da semana identificáveis.');
+  } else {
+    add('ok',`Cabeçalho: periodicidade identificada como ${dias.map(d => NS[d]).join(' e ')}.`);
+  }
+
+  if (!turma) add('wa','Cabeçalho: turma não identificada.');
+  else add('ok',`Cabeçalho: turma identificada como "${turma}".`);
+
+  if (!horario) {
+    add('wa','Cabeçalho: horário não identificado; não foi possível calcular a duração da aula.');
+  } else {
+    const dur = parseScheduleDuration(horario);
+    if (dur == null) add('wa',`Cabeçalho: horário "${horario}" foi lido, mas a duração não pôde ser calculada com segurança.`);
+    else add('ok',`Cabeçalho: duração calculada de ${formatHours(dur)} por aula.`);
+  }
+
+  const maxDay = new Date(ano,mi+1,0).getDate();
+  const expected = [];
+  for (let d=1; d<=maxDay; d++) {
+    if (dias.includes(new Date(ano,mi,d).getDay())) expected.push(d);
+  }
+
+  const actualDays = hdr.map(h => h.day).filter((d,i,a) => a.indexOf(d) === i).sort((a,b)=>a-b);
+  const missing = expected.filter(d => !actualDays.includes(d));
+  const extra = actualDays.filter(d => !expected.includes(d));
+
+  if (!hdr.length) {
+    add('er','Cabeçalho: nenhuma data diária foi localizada.');
+  } else if (actualDays.length < Math.min(10, maxDay)) {
+    add('er',`Cabeçalho: somente ${actualDays.length} datas foram localizadas; o calendário está incompleto.`);
+  } else {
+    add('ok',`Cabeçalho: ${actualDays.length} datas reais foram vinculadas ao calendário.`);
+  }
+
+  // Confere a coerência dos números impressos no cabeçalho.
+  const repeated = actualDays.filter((d,i,a) => a.indexOf(d) !== i);
+  if (repeated.length) {
+    add('er',`Cabeçalho: datas duplicadas detectadas (${[...new Set(repeated)].join(', ')}).`);
+  }
+
+  if (missing.length) {
+    add('wa',`Cabeçalho: ${missing.length} data(s) do mês não foram localizadas (${missing.join(', ')}).`);
+  }
+  if (extra.length) {
+    add('wa',`Cabeçalho: há ${extra.length} data(s) no cabeçalho que não pertencem à periodicidade (${extra.join(', ')}).`);
+  }
+
+  // Verifica se as datas do cabeçalho respeitam o dia da semana calculado.
+  const wrongWeekdays = hdr.filter(h => {
+    const dt = new Date(ano,mi,h.day);
+    return dias.length && !dias.includes(dt.getDay());
+  });
+  if (wrongWeekdays.length) {
+    add('er',`Cabeçalho: ${wrongWeekdays.length} data(s) encontradas no cabeçalho não correspondem aos dias da periodicidade.`);
+  } else if (hdr.length) {
+    add('ok','Cabeçalho: as datas localizadas são compatíveis com a periodicidade informada.');
+  }
+
+  return checks;
+}
+
+function calculateWorkload(ano, mi, dias, horario, alunos) {
+  const duration = parseScheduleDuration(horario);
+  const last = new Date(ano,mi+1,0).getDate();
+  const dates = [];
+
+  for (let d=1; d<=last; d++) {
+    const dt = new Date(ano,mi,d);
+    if (dias.includes(dt.getDay())) {
+      dates.push({
+        day:d,
+        key:`${ano}-${String(mi+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`
+      });
+    }
+  }
+
+  if (duration == null) {
+    return {
+      duration:null,
+      expectedClasses:dates.length,
+      expectedMinutes:null,
+      realizedClasses:null,
+      realizedMinutes:null,
+      dates
+    };
+  }
+
+  // Uma data só é considerada realizada quando existe pelo menos P/A.
+  // Se todos os alunos têm "-", tratamos como dia sem aula.
+  let realizedClasses = 0;
+  for (const d of dates) {
+    if (!alunos.length) continue;
+    const statuses = alunos.map(a => a.mk?.[d.key]?.status || '');
+    const hasPA = statuses.some(s => s === 'P' || s === 'A');
+    const allDash = statuses.length > 0 && statuses.every(s => s === '-');
+    if (hasPA && !allDash) realizedClasses++;
+  }
+
+  return {
+    duration,
+    expectedClasses:dates.length,
+    expectedMinutes:dates.length * duration,
+    realizedClasses,
+    realizedMinutes:realizedClasses * duration,
+    dates
+  };
+}
+
+function duplicateKey(name) {
+  return norm(name)
+    .replace(/\b(de|da|do|das|dos|e)\b/g,' ')
+    .replace(/[^a-z0-9]+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+}
+
+function nameSimilarity(a,b) {
+  const A = duplicateKey(a).split(' ').filter(Boolean);
+  const B = duplicateKey(b).split(' ').filter(Boolean);
+  if (!A.length || !B.length) return 0;
+  if (duplicateKey(a) === duplicateKey(b)) return 1;
+
+  const sa = new Set(A), sb = new Set(B);
+  const inter = [...sa].filter(x => sb.has(x)).length;
+  return (2 * inter) / (sa.size + sb.size);
+}
+
+function detectDuplicates(results) {
+  const entries = [];
+  results.forEach((r, blockIndex) => {
+    (r.A || []).forEach((a, studentIndex) => {
+      entries.push({
+        blockIndex,
+        studentIndex,
+        nome:a.nome,
+        turma:r.I?.Turma || `Bloco ${blockIndex+1}`,
+        arquivo:r.__name || `Bloco ${blockIndex+1}`,
+        key:duplicateKey(a.nome)
+      });
+    });
+  });
+
+  const exact = [];
+  const fuzzy = [];
+  const seenPairs = new Set();
+
+  for (let i=0; i<entries.length; i++) {
+    for (let j=i+1; j<entries.length; j++) {
+      const x=entries[i], y=entries[j];
+      if (!x.key || !y.key) continue;
+
+      // Mesmo aluno no mesmo bloco.
+      if (x.key === y.key) {
+        exact.push({a:x,b:y,within:x.blockIndex===y.blockIndex});
+        continue;
+      }
+
+      const pair = `${i}|${j}`;
+      if (seenPairs.has(pair)) continue;
+      const sim = nameSimilarity(x.nome,y.nome);
+      // Similaridade alta: aviso para conferência manual, não erro automático.
+      if (sim >= 0.88) {
+        seenPairs.add(pair);
+        fuzzy.push({a:x,b:y,similarity:sim});
+      }
+    }
+  }
+
+  return {entries, exact, fuzzy};
+}
+
+function duplicateEvidence(results) {
+  const d = detectDuplicates(results);
+  const total = d.exact.length + d.fuzzy.length;
+
+  let h = `<div class="sec">
+    <h3>Duplicidade de beneficiários entre blocos/turmas</h3>`;
+
+  if (!total) {
+    h += `<div class="alert-box ok"><strong>✔ Nenhuma duplicidade identificada</strong>
+      Não foi encontrado o mesmo nome em mais de um bloco/turma, nem nomes altamente semelhantes.</div>`;
+  } else {
+    h += `<div class="dup-grid">`;
+
+    d.exact.forEach(x => {
+      const scope = x.within ? 'duplicidade dentro do mesmo bloco' : 'beneficiário encontrado em mais de um bloco/turma';
+      h += `<div class="alert-box er">
+        <strong>✘ Duplicidade</strong>
+        <b>${esc(x.a.nome)}</b><br>
+        ${esc(x.a.arquivo)} — ${esc(x.a.turma)}<br>
+        ${esc(x.b.arquivo)} — ${esc(x.b.turma)}<br>
+        <span class="small">${esc(scope)}</span>
+      </div>`;
+    });
+
+    d.fuzzy.forEach(x => {
+      h += `<div class="alert-box wa">
+        <strong>! Possível duplicidade</strong>
+        <b>${esc(x.a.nome)}</b><br>
+        ${esc(x.a.arquivo)} — ${esc(x.a.turma)}<br>
+        ↔ <b>${esc(x.b.nome)}</b><br>
+        ${esc(x.b.arquivo)} — ${esc(x.b.turma)}<br>
+        <span class="small">Nomes semelhantes (${Math.round(x.similarity*100)}%). Confirme manualmente.</span>
+      </div>`;
+    });
+
+    h += `</div>`;
+  }
+
+  h += `<p class="date-note">
+    A comparação usa o nome normalizado (sem acentos e diferenças de caixa). 
+    Nomes semelhantes são apenas alertas; não são tratados como duplicidade definitiva.
+  </p></div>`;
+
+  return h;
+}
+
+function workloadEvidence(results) {
+  let h = `<div class="sec"><h3>Carga horária calculada</h3>
+    <div class="table-wrap"><table class="calendar-table">
+      <thead><tr>
+        <th>Bloco/turma</th><th>Horário</th><th>Duração</th>
+        <th>Aulas previstas</th><th>Carga prevista</th>
+        <th>Aulas registradas</th><th>Carga registrada</th><th>Situação</th>
+      </tr></thead><tbody>`;
+
+  results.forEach(r => {
+    const w = r.cargaHoraria;
+    const ok = w && w.duration != null;
+    const realized = ok && w.realizedClasses != null ? formatHours(w.realizedMinutes) : '—';
+    h += `<tr>
+      <td>${esc(r.I?.Turma || r.__name || '—')}</td>
+      <td>${esc(r.I?.Horário || '—')}</td>
+      <td>${ok ? esc(formatHours(w.duration)) : '—'}</td>
+      <td>${w?.expectedClasses ?? '—'}</td>
+      <td>${ok ? esc(formatHours(w.expectedMinutes)) : '—'}</td>
+      <td>${w?.realizedClasses ?? '—'}</td>
+      <td>${realized}</td>
+      <td><span class="pill ${ok ? 'ok' : 'wa'}">${ok ? 'Calculada' : 'Requer conferência'}</span></td>
+    </tr>`;
+  });
+
+  h += `</tbody></table></div>
+    <p class="date-note">
+      A carga prevista = número de aulas do calendário × duração do horário.
+      A carga registrada considera datas que possuem P/A; datas marcadas com “-” para todos não entram como aula realizada.
+    </p></div>`;
+  return h;
+}
+
+function globalValidationEvidence(results) {
+  const h = results.flatMap(r => r.headerChecks || []);
+  const errors = h.filter(x=>x.t==='er').length;
+  const warns = h.filter(x=>x.t==='wa').length;
+
+  return `<div class="sec"><h3>Validação dos cabeçalhos</h3>
+    <div class="check-grid">
+      <div class="alert-box ${errors ? 'er' : 'ok'}">
+        <strong>${errors ? '✘' : '✔'} Cabeçalhos analisados</strong>
+        ${results.length} bloco(s)/arquivo(s) conferido(s).
+      </div>
+      <div class="alert-box ${errors ? 'er' : warns ? 'wa' : 'ok'}">
+        <strong>${errors ? 'Erros' : warns ? 'Avisos' : 'Sem inconsistências'}</strong>
+        ${errors} erro(s) e ${warns} aviso(s) estrutural(is).
+      </div>
+    </div>
+    <ul style="margin-top:10px">
+      ${results.flatMap(r => (r.headerChecks||[]).map(c =>
+        `<li class="${c.t}"><b>${esc(r.__name || r.I?.Turma || 'Bloco')}</b>: ${esc(c.m)}</li>`
+      )).join('')}
+    </ul>
+  </div>`;
+}
+
+
 function analyze(items,dsig,ocr,img) {
   const C = [];
   const A = [];
@@ -894,6 +1229,12 @@ function analyze(items,dsig,ocr,img) {
   I['Professor'] = prof;
   I['Coordenador'] = coord;
   I['Horário'] = val(items,/^hor(?:ário|ario):?\s*(.*)$/i,0,CUT);
+
+  // Alguns modelos possuem a carga horária explicitamente no cabeçalho.
+  I['Carga horária apresentada'] = readHeaderField(
+    items,
+    ['carga horária','carga horaria','carga-horária','carga-horaria']
+  );
 
   const periodicidadeLida = readPeriodicity(
     items,
@@ -1042,12 +1383,23 @@ function analyze(items,dsig,ocr,img) {
   const previstas = calendario.filter(x => x.expected);
   const hdr = detectHeaderDays(items, mi, ano);
 
+  const headerChecks = validateHeader(
+    items, mi, ano, dias, hdr, I['Horário'], I['Periodicidade'], I['Turma']
+  );
+
+  if (headerChecks.length) {
+    headerChecks.forEach(x => {
+      if (x.t === 'er') add('er', x.m);
+      else if (x.t === 'wa') add('wa', x.m);
+    });
+  }
+
   if (!hdr.length || hdr.length < Math.min(10, dim)) {
     add(
       'er',
       'Não encontrei o calendário diário completo da lista. O sistema precisa localizar os números das datas no cabeçalho antes de conferir P/A.'
     );
-    return {C,I,A};
+    return {C,I,A,headerChecks};
   }
 
   /*
@@ -1409,13 +1761,36 @@ function analyze(items,dsig,ocr,img) {
     }
   }
 
+  const cargaHoraria = calculateWorkload(
+    ano, mi, dias, I['Horário'], A
+  );
+
+  if (cargaHoraria.duration != null) {
+    add(
+      'ok',
+      `Carga horária prevista no mês: ${formatHours(cargaHoraria.expectedMinutes)} ` +
+      `(${cargaHoraria.expectedClasses} aula(s) de ${formatHours(cargaHoraria.duration)}).`
+    );
+    if (cargaHoraria.realizedClasses != null) {
+      add(
+        cargaHoraria.realizedClasses === cargaHoraria.expectedClasses ? 'ok' : 'wa',
+        `Carga horária registrada: ${formatHours(cargaHoraria.realizedMinutes)} ` +
+        `(${cargaHoraria.realizedClasses} aula(s) com P/A).`
+      );
+    }
+  } else {
+    add('wa','Não foi possível calcular a carga horária porque o horário não contém dois horários válidos.');
+  }
+
   return {
     C,
     I,
     A,
     calendario,
     previstas,
-    referencia: {mes: mi, ano}
+    referencia: {mes: mi, ano},
+    headerChecks,
+    cargaHoraria
   };
 }
 
@@ -1619,6 +1994,38 @@ function render(name,r) {
       '</div>';
   }
 
+  if (r.headerChecks?.length) {
+    h +=
+      '<div class="sec">' +
+        '<h3>Verificação do cabeçalho</h3>' +
+        '<ul>' +
+          r.headerChecks.map(c =>
+            '<li class="' + c.t + '">' + esc(c.m) + '</li>'
+          ).join('') +
+        '</ul>' +
+      '</div>';
+  }
+
+  if (r.cargaHoraria) {
+    const w = r.cargaHoraria;
+    h +=
+      '<div class="sec">' +
+        '<h3>Carga horária</h3>' +
+        '<ul>' +
+          '<li class="ok">Carga prevista: ' +
+            esc(w.duration != null ? formatHours(w.expectedMinutes) : 'não calculada') +
+            ' (' + esc(w.expectedClasses) + ' aula(s)).</li>' +
+          '<li class="' + (w.duration != null ? 'ok' : 'wa') + '">Duração por aula: ' +
+            esc(w.duration != null ? formatHours(w.duration) : 'não identificada') + '.</li>' +
+          '<li class="' + (w.duration != null && w.realizedClasses === w.expectedClasses ? 'ok' : 'wa') +
+            '">Carga registrada: ' +
+            esc(w.realizedMinutes != null ? formatHours(w.realizedMinutes) : 'não calculada') +
+            (w.realizedClasses != null ? ' (' + esc(w.realizedClasses) + ' aula(s) com P/A)' : '') +
+            '.</li>' +
+        '</ul>' +
+      '</div>';
+  }
+
   h += calendarEvidence(r);
   h += studentMatrix(r);
 
@@ -1636,6 +2043,8 @@ async function run(files) {
   out.innerHTML = '';
 
   if (!files.length) return;
+
+  const analyzedResults = [];
 
   for (const f of files) {
     const box = document.createElement('div');
@@ -1664,7 +2073,6 @@ async function run(files) {
         '</div>';
 
       const progress = box.querySelector('.progress span');
-
       if (progress) progress.style.width = '10%';
 
       const result = await extract(f);
@@ -1684,8 +2092,10 @@ async function run(files) {
         result.img
       );
 
-      if (progress) progress.style.width = '100%';
+      analyzed.__name = f.name;
+      analyzedResults.push(analyzed);
 
+      if (progress) progress.style.width = '100%';
       box.innerHTML = render(f.name,analyzed);
 
     } catch(e) {
@@ -1698,6 +2108,27 @@ async function run(files) {
           '</div>' +
         '</div>';
     }
+  }
+
+  // Comparação por bloco: somente arquivos efetivamente analisados.
+  if (analyzedResults.length >= 1) {
+    const global = document.createElement('div');
+    global.innerHTML =
+      '<div class="card">' +
+        '<div class="hd">' +
+          '<h2>Conferência global dos blocos</h2>' +
+          '<span class="bg ' +
+            ((detectDuplicates(analyzedResults).exact.length) ? 'er' : 'ok') +
+          '">' +
+            (analyzedResults.length > 1 ? 'Comparação concluída' : 'Validação concluída') +
+          '</span>' +
+        '</div>' +
+        duplicateEvidence(analyzedResults) +
+        globalValidationEvidence(analyzedResults) +
+        workloadEvidence(analyzedResults) +
+      '</div>';
+
+    out.appendChild(global);
   }
 }
 
