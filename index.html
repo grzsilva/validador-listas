@@ -226,65 +226,168 @@ function cnOf(b, name) {
   return '';
 }
 
-function signerName(hex) {
-  try {
-    const clean = hex.replace(/[^0-9a-f]/gi,'');
-    const bytes = clean.match(/../g);
-    if (!bytes) return '';
+/*
+ * Assinaturas GOV.BR / ICP-Brasil
+ * --------------------------------
+ * PDF assinado pelo gov.br normalmente carrega no /Contents um CMS/PKCS#7
+ * com o certificado X.509 do assinante e, muitas vezes, a cadeia de
+ * certificação. A implementação anterior tentava navegar pelo ASN.1 com
+ * posições fixas; isso falha em certificados/cadeias diferentes.
+ *
+ * Aqui usamos node-forge apenas para DECODIFICAR o CMS no navegador. Não
+ * enviamos o PDF para servidor e não fazemos validação criptográfica do
+ * conteúdo assinado; identificamos o certificado do assinante e seus dados.
+ */
+let forgePromise = null;
 
-    const b = new Uint8Array(bytes.map(h => parseInt(h,16)));
-    const root = der(b,0);
-    const rootKids = kids(b,root);
-    if (!rootKids[1]) return '';
-
-    const signerSetContainer = kids(b,rootKids[1])[0];
-    if (!signerSetContainer) return '';
-
-    const signerEntries = kids(b,signerSetContainer);
-    const cs = [];
-
-    for (const c of signerEntries) {
-      const cKidsContainer = kids(b,c)[0];
-      if (!cKidsContainer) continue;
-
-      const ch = kids(b,cKidsContainer);
-      const o = ch[0] && ch[0].t === 0xA0 ? 1 : 0;
-
-      if (!ch[o+2] || !ch[o+4]) continue;
-
-      const key = n => Array.from(b.slice(n.p,n.e)).join(',');
-      cs.push({
-        iss:key(ch[o+2]),
-        sub:key(ch[o+4]),
-        cn:cnOf(b,ch[o+4])
+function loadForge() {
+  if (window.forge) return Promise.resolve(window.forge);
+  if (!forgePromise) {
+    forgePromise = loadJs('https://cdnjs.cloudflare.com/ajax/libs/forge/1.3.1/forge.min.js')
+      .then(() => {
+        if (!window.forge) throw new Error('Biblioteca de certificados não carregada.');
+        return window.forge;
       });
-    }
+  }
+  return forgePromise;
+}
 
-    const leaf = cs.find(c => !cs.some(x => x !== c && x.iss === c.sub)) || cs[0];
-    return leaf ? leaf.cn.replace(/:\s*\*\d+\s*$/,'').trim() : '';
-  } catch {
-    return '';
+function hexToBinary(hex) {
+  const clean = String(hex || '').replace(/[^0-9a-f]/gi,'');
+  const pairs = clean.match(/../g) || [];
+  return pairs.map(h => String.fromCharCode(parseInt(h,16))).join('');
+}
+
+function attrValue(cert, names) {
+  const attrs = cert?.subject?.attributes || [];
+  const a = attrs.find(x =>
+    names.includes(String(x.shortName || '').toUpperCase()) ||
+    names.includes(String(x.name || '').toUpperCase())
+  );
+  return a?.value ? String(a.value).trim() : '';
+}
+
+function certName(cert) {
+  return (
+    attrValue(cert,['CN','COMMONNAME']) ||
+    attrValue(cert,['SERIALNUMBER']) ||
+    ''
+  ).replace(/\s*:\s*\*\d+\s*$/,'').trim();
+}
+
+function certInfo(cert) {
+  const subject = cert?.subject?.attributes || [];
+  const issuer = cert?.issuer?.attributes || [];
+  const get = (arr, names) => {
+    const a = arr.find(x =>
+      names.includes(String(x.shortName || '').toUpperCase()) ||
+      names.includes(String(x.name || '').toUpperCase())
+    );
+    return a?.value ? String(a.value).trim() : '';
+  };
+
+  const nome = certName(cert);
+  const cpf = get(subject,['SERIALNUMBER','2.5.4.5']);
+  const emissor = get(issuer,['CN','COMMONNAME']);
+  const org = get(subject,['O','ORGANIZATIONNAME']);
+  const unidade = get(subject,['OU','ORGANIZATIONALUNITNAME']);
+
+  return {
+    nome,
+    cpf,
+    emissor,
+    org,
+    unidade,
+    subjectHash:cert?.subject?.hash || '',
+    issuerHash:cert?.issuer?.hash || '',
+    serial:cert?.serialNumber || '',
+    validoDe:cert?.validity?.notBefore ? cert.validity.notBefore.toISOString() : '',
+    validoAte:cert?.validity?.notAfter ? cert.validity.notAfter.toISOString() : ''
+  };
+}
+
+function escolherCertificadoAssinante(certs) {
+  if (!certs?.length) return null;
+
+  // O certificado final normalmente é aquele cujo subject não é o issuer
+  // de outro certificado presente na cadeia.
+  const issuers = new Set(
+    certs.map(c => c?.issuer?.hash).filter(Boolean)
+  );
+
+  const folhas = certs.filter(c => c?.subject?.hash && !issuers.has(c.subject.hash));
+  const candidatos = folhas.length ? folhas : certs;
+
+  // Certificado de assinatura de pessoa costuma ter CN e serialNumber;
+  // CAs normalmente têm basicConstraints CA=true e/ou CN de AC.
+  const pessoais = candidatos.filter(c => {
+    const info = certInfo(c);
+    const ca = c?.extensions?.some(e =>
+      e.name === 'basicConstraints' && e.cA === true
+    );
+    return !ca && !!info.nome;
+  });
+
+  return pessoais[0] || candidatos[0] || null;
+}
+
+async function signerInfoFromCms(hex) {
+  try {
+    const forge = await loadForge();
+    const bin = hexToBinary(hex);
+    if (bin.length < 100) return null;
+
+    const asn1 = forge.asn1.fromDer(bin, false, false);
+    const msg = forge.pkcs7.messageFromAsn1(asn1);
+    const certs = Array.isArray(msg.certificates) ? msg.certificates : [];
+    if (!certs.length) return null;
+
+    const cert = escolherCertificadoAssinante(certs);
+    if (!cert) return null;
+
+    const info = certInfo(cert);
+    if (!info.nome) return null;
+
+    const texto = [info.emissor,info.org,info.unidade].join(' ');
+    info.icpBrasil = /ICP[- ]?Brasil|ICP-Brasil/i.test(texto);
+    info.govbr = /gov\.br|governo federal/i.test(texto);
+    info.tipo = info.govbr ? 'GOV.BR' : (info.icpBrasil ? 'ICP-Brasil' : 'Certificado digital');
+    return info;
+  } catch (e) {
+    return null;
   }
 }
 
-function readSigs(buf) {
+async function readSigs(buf) {
   const s = new TextDecoder('latin1').decode(buf);
   const out = [];
+
+  /*
+   * Primeiro procuramos Contents associados a ByteRange. Depois mantemos
+   * fallback para qualquer Contents hexadecimal grande, porque alguns
+   * geradores de PDF variam a ordem dos objetos.
+   */
   const re = /\/Contents\s*<([0-9A-Fa-f]{200,})>/g;
   let m;
+  const seen = new Set();
 
   while ((m = re.exec(s))) {
+    const hex = m[1];
+    if (seen.has(hex)) continue;
+    seen.add(hex);
+
     try {
       const w = s.slice(
-        Math.max(0,m.index-1200),
-        Math.min(s.length,m.index+m[0].length+1200)
+        Math.max(0,m.index-2500),
+        Math.min(s.length,m.index+m[0].length+2500)
       );
-      const d = /\/M\s*\(D:(\d{4})(\d{2})(\d{2})/.exec(w);
-      const nome = signerName(m[1]);
 
-      if (nome && !out.some(o => norm(o.nome) === norm(nome))) {
+      const d = /\/M\s*\(D:(\d{4})(\d{2})(\d{2})(?:\d{2})?(?:\d{2})?(?:\d{2})?/i.exec(w);
+      const info = await signerInfoFromCms(hex);
+
+      if (info?.nome && !out.some(o => norm(o.nome) === norm(info.nome))) {
         out.push({
-          nome,
+          ...info,
           data:d ? `${d[3]}/${d[2]}/${d[1]}` : ''
         });
       }
@@ -449,7 +552,7 @@ async function extract(file) {
    * página a página apenas quando necessário.
    */
   const allItems = [];
-  const sigs = readSigs(buf);
+  const sigs = await readSigs(buf);
   let usedOcr = false;
 
   for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
@@ -647,39 +750,42 @@ function parseReference(items) {
  * Aceita nomes completos, plurais, "terça-feira", abreviações e 2ª/5ª.
  */
 function extractPeriodDays(per) {
-  let text = norm(per)
+  let raw = String(per || '')
     .replace(/[–—−]/g,'-')
-    .replace(/\bfeira(s)?\b/g,'')
-    .replace(/[(),;]/g,' ');
+    .replace(/[(),;]/g,' ')
+    .replace(/([a-záéíóúãõç])([A-ZÁÉÍÓÚÃÕÇ])/g,'$1 $2');
 
+  /*
+   * O PDF pode concatenar palavras de campos vizinhos, por exemplo:
+   * "02 vezes na semanaSegunda e Quarta".  Normalizamos esses casos
+   * antes de procurar os dias.
+   */
+  raw = raw
+    .replace(/semana(?=(?:domingo|segunda|terça|terca|quarta|quinta|sexta|sábado|sabado))/ig, 'semana ')
+    .replace(/(domingo|segunda|terça|terca|quarta|quinta|sexta|sábado|sabado)-?feira/ig, '$1');
+
+  const text = norm(raw).replace(/\s+/g,' ').trim();
   const days = [];
-  const add = n => {
-    if (!days.includes(n)) days.push(n);
-  };
+  const add = n => { if (!days.includes(n)) days.push(n); };
 
   const aliases = [
-    [/\bdom(?:ingo|ingos)?\b/i,0],
-    [/\bseg(?:unda|undas)?\b/i,1],
-    [/\bter(?:ca|cas)\b/i,2],
-    [/\bqua(?:rta|rtas)?\b/i,3],
-    [/\bqui(?:nta|ntas)?\b/i,4],
-    [/\bsex(?:ta|tas)?\b/i,5],
-    [/\bsab(?:ado|ados)?\b/i,6]
+    [/\bdomingo\b/gi,0],
+    [/\bsegunda\b/gi,1],
+    [/\bterca\b/gi,2],
+    [/\bquarta\b/gi,3],
+    [/\bquinta\b/gi,4],
+    [/\bsexta\b/gi,5],
+    [/\bsabado\b/gi,6]
   ];
 
-  for (const [re,n] of aliases) {
-    if (re.test(text)) add(n);
-  }
+  for (const [re,n] of aliases) if (re.test(text)) add(n);
 
   /* 1ª=domingo, 2ª=segunda, ..., 7ª=sábado. */
   for (const m of text.matchAll(/\b([1-7])\s*(?:ª|a|º)\b/gi)) {
     add(Number(m[1]) - 1);
   }
 
-  /*
-   * Alguns OCRs removem o símbolo ordinal e deixam "2 e 5".
-   * Só aceitamos números nesse formato quando há contexto de periodicidade.
-   */
+  /* OCR pode remover o ordinal e deixar "2 e 4". */
   if (/\b(?:vez|vezes|semana|semanal|dias?)\b/i.test(text)) {
     for (const m of text.matchAll(/(?:^|[\s/,-])([1-7])(?:\s*(?:e|\/)\s*([1-7]))+/gi)) {
       add(Number(m[1]) - 1);
@@ -698,69 +804,84 @@ function extractPeriodDays(per) {
 }
 
 /*
- * Reconstrói o campo "Periodicidade" mesmo quando o OCR separa
- * o rótulo e o valor em linhas diferentes.
+ * Reconstrói a periodicidade a partir do texto real do formulário.
+ * Alguns modelos deixam o rótulo "Periodicidade" vazio no primeiro
+ * cabeçalho e imprimem o valor novamente no rodapé:
+ *   "Periodicidade 02 vezes na semanaSegunda e Quarta Núcleo: ..."
+ * Nunca usamos o texto do Coordenador/Núcleo como valor da periodicidade.
  */
 function readPeriodicity(items, currentValue='') {
   const candidates = [];
-  if (currentValue) candidates.push(currentValue);
 
-  const labels = items.filter(i =>
-    /^periodicidade\s*:?\s*$/i.test(String(i.s || '').trim())
+  const clean = value => String(value || '')
+    .replace(/\s+/g,' ')
+    .replace(/\bperiodicidade\s*:??\s*/i,'')
+    /* corta o valor antes de outro campo do formulário */
+    .split(/(?=\b(?:núcleo|nucleo|turma|mês|mes|modalidade|professor|auxiliar|coordenador)\s*:)/i)[0]
+    .trim();
+
+  const addCandidate = value => {
+    const v = clean(value);
+    if (!v) return;
+    const parsed = extractPeriodDays(v);
+    if (!parsed.days.length) return;
+    let score = parsed.days.length * 20;
+    if (parsed.frequency != null) score += 30;
+    if (/\bsemana\b/i.test(parsed.text)) score += 10;
+    candidates.push({value:v, parsed, score});
+  };
+
+  addCandidate(currentValue);
+
+  /* Texto integral na ordem visual do documento. */
+  const joined = items
+    .slice()
+    .sort((a,b) => (a.page||0)-(b.page||0) || a.y-b.y || a.x-b.x)
+    .map(i => i.s)
+    .join(' ');
+
+  /*
+   * Primeiro tentamos o padrão explícito "Periodicidade ..." e cortamos
+   * antes do próximo campo. Isso evita capturar "Coordenador Geral ...".
+   */
+  const explicit = joined.match(
+    /periodicidade\s*:?\s*(.{0,220}?)(?=\b(?:núcleo|nucleo|turma|mês|mes|agosto|janeiro|fevereiro|março|marco|abril|maio|junho|julho|setembro|outubro|novembro|dezembro|modalidade|professor|auxiliar|coordenador)\s*:|$)/i
   );
 
+  if (explicit) addCandidate(explicit[1]);
+
+  /* Procura diretamente por "N vezes na semana + dias" mesmo se
+     "semana" e o primeiro dia estiverem concatenados pelo PDF. */
+  const direct = joined.match(
+    /\b(\d+)\s*vez(?:es)?\s*na\s*semana\s*((?:segunda|terca|terça|quarta|quinta|sexta|sabado|sábado|domingo)(?:\s*(?:e|,|\/|segunda|terca|terça|quarta|quinta|sexta|sabado|sábado|domingo|-feira)[^\n]{0,80})?)/i
+  );
+  if (direct) addCandidate(`${direct[1]} vezes na semana ${direct[2]}`);
+
+  /* Candidatos espaciais: somente os que já contêm um dia da semana. */
+  const labels = items.filter(i => /^periodicidade\s*:??\s*$/i.test(String(i.s || '').trim()));
   for (const label of labels) {
     const nearby = items
       .filter(i => {
         if (i === label) return false;
-
         const dy = i.y - label.y;
         const dx = i.x - label.x;
-
-        const sameLine = Math.abs(dy) <= 12 && dx > -5 && dx < 500;
-        const below = dy > 0 && dy <= 42 && Math.abs(dx) < 500;
-
-        return sameLine || below;
+        return Math.abs(dy) <= 14 && dx > -5 && dx < 700;
       })
-      .sort((a,b) => {
-        const da = Math.abs(a.y-label.y) + Math.max(0, label.x-a.x);
-        const db = Math.abs(b.y-label.y) + Math.max(0, label.x-b.x);
-        return da-db;
-      });
-
-    if (nearby.length) {
-      candidates.push(nearby.slice(0,12).map(i => i.s).join(' '));
-    }
+      .sort((a,b) => a.x-b.x)
+      .map(i => i.s)
+      .join(' ');
+    addCandidate(nearby);
   }
 
-  /* Último recurso: texto integral do documento. */
-  candidates.push(
-    items.slice()
-      .sort((a,b) => a.y-b.y || a.x-b.x)
-      .map(i => i.s)
-      .join(' ')
-  );
+  candidates.sort((a,b) => b.score-a.score);
 
-  let best = {
+  if (candidates.length) return candidates[0];
+
+  return {
     value:'',
     parsed:{days:[],frequency:null,text:''},
     score:-1
   };
-
-  for (const value of candidates) {
-    const parsed = extractPeriodDays(value);
-    let score = parsed.days.length * 10;
-
-    if (parsed.frequency != null) score += 3;
-    if (/periodicidade/i.test(value)) score += 4;
-    if (/\b(?:semana|semanal|vez|vezes)\b/i.test(parsed.text)) score += 2;
-
-    if (score > best.score) {
-      best = {value:value.trim(), parsed, score};
-    }
-  }
-
-  return best;
 }
 
 function buildCalendar(year, monthIndex, periodicityDays) {
@@ -790,130 +911,96 @@ function formatDateBR(year, monthIndex, day) {
 
 function detectHeaderDays(items, monthIndex, year) {
   /*
-   * O cabeçalho da lista é uma representação visual do calendário.
-   * Porém alguns modelos terminam com o primeiro dia do mês seguinte:
-   *
-   *   1 2 3 ... 29 30 1
-   *
-   * Portanto NÃO usamos a posição da coluna como se ela fosse a data.
-   * Primeiro identificamos o número impresso e o transformamos em uma
-   * data real do mês/ano. O último "1" fica fora porque já existe o
-   * dia 1 do mês atual.
+   * O cabeçalho pode ser devolvido pelo PDF em uma, duas ou várias linhas.
+   * Por isso não escolhemos mais uma única linha de números. Reunimos grupos
+   * numéricos próximos que, em conjunto, formam o calendário do mês.
    */
   const maxDay = new Date(year, monthIndex + 1, 0).getDate();
 
-  const nums = items
-    .filter(i => /^\d{1,2}$/.test(String(i.s).trim()))
-    .map(i => ({
-      ...i,
-      d: Number(String(i.s).trim()),
-      cx: i.x + (i.w || 0) / 2
-    }))
-    .filter(i => i.d >= 1 && i.d <= maxDay);
+  const nums = [];
+  for (const i of items || []) {
+    const text = String(i.s || '').trim();
+    const matches = [...text.matchAll(/\b(\d{1,2})\b/g)];
+
+    if (!matches.length) continue;
+
+    /* Se o PDF entregou vários números em um único item, distribuímos
+       aproximadamente pela largura do item. */
+    if (matches.length === 1) {
+      const d = Number(matches[0][1]);
+      if (d >= 1 && d <= maxDay) {
+        nums.push({...i,d,cx:i.x+(i.w||0)/2});
+      }
+    } else {
+      const w = Number(i.w) || Math.max(10, text.length * 5);
+      const step = w / matches.length;
+      matches.forEach((m,k) => {
+        const d = Number(m[1]);
+        if (d >= 1 && d <= maxDay) {
+          nums.push({...i,d,cx:i.x+step*(k+0.5),w:step});
+        }
+      });
+    }
+  }
 
   if (!nums.length) return [];
 
   const groups = new Map();
-
   nums.forEach(i => {
     const key = Math.round(i.y / 5) * 5;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(i);
   });
 
-  function scoreGroup(group) {
-    const ordered = group.slice().sort((a,b) => a.cx-b.cx);
+  const candidates = [...groups.entries()]
+    .map(([y,group]) => {
+      const byDay = new Map();
+      group.slice().sort((a,b)=>a.cx-b.cx).forEach(i => {
+        if (!byDay.has(i.d)) byDay.set(i.d,i);
+      });
+      const days=[...byDay.keys()].sort((a,b)=>a-b);
+      return {y, group:[...byDay.values()], days};
+    })
+    .filter(g => g.days.length >= Math.min(5,maxDay))
+    .sort((a,b)=>b.days.length-a.days.length || a.y-b.y);
 
-    /*
-     * Para cada dia, guardamos somente a primeira ocorrência.
-     * Isso é essencial para o padrão "... 29 30 1": o primeiro "1"
-     * é junho/1 e o segundo "1" seria julho/1.
-     */
-    const byDay = new Map();
+  if (!candidates.length) return [];
 
-    for (const item of ordered) {
-      if (!byDay.has(item.d)) byDay.set(item.d, item);
-    }
+  /*
+   * Junta linhas próximas do melhor grupo. Isso cobre cabeçalhos quebrados
+   * pelo PDF sem absorver as linhas dos alunos.
+   */
+  const anchor = candidates[0].y;
+  const selected = candidates.filter(g => Math.abs(g.y-anchor) <= 55);
 
-    const days = [...byDay.keys()].sort((a,b) => a-b);
+  const byDay = new Map();
+  selected
+    .flatMap(g => g.group)
+    .sort((a,b)=>a.cx-b.cx || a.y-b.y)
+    .forEach(i => {
+      if (!byDay.has(i.d)) byDay.set(i.d,i);
+    });
 
-    if (days.length < Math.min(5, maxDay)) {
-      return { score: -Infinity, group: [] };
-    }
-
-    let consecutive = 0;
-    let longest = days.length ? 1 : 0;
-    let current = days.length ? 1 : 0;
-
-    for (let i = 1; i < days.length; i++) {
-      if (days[i] === days[i-1] + 1) {
-        consecutive++;
-        current++;
-        longest = Math.max(longest, current);
-      } else {
-        current = 1;
-      }
-    }
-
-    const points = [...byDay.values()].sort((a,b) => a.cx-b.cx);
-
-    let regularity = 0;
-    if (points.length >= 3) {
-      const gaps = [];
-      for (let i = 1; i < points.length; i++) {
-        const dx = points[i].cx - points[i-1].cx;
-        if (dx > 0) gaps.push(dx);
-      }
-
-      if (gaps.length) {
-        const avg = gaps.reduce((a,b) => a+b,0) / gaps.length;
-        const variance =
-          gaps.reduce((a,b) => a + Math.pow(b-avg,2),0) / gaps.length;
-        const cv = avg ? Math.sqrt(variance) / avg : 1;
-        regularity = Math.max(0, 25 - cv * 25);
-      }
-    }
-
-    const startsAtOne = days[0] === 1 ? 40 : 0;
-    const hasEnd = days.includes(maxDay) ? 25 : 0;
-
-    const score =
-      days.length * 12 +
-      consecutive * 20 +
-      longest * 18 +
-      regularity +
-      startsAtOne +
-      hasEnd;
-
-    return { score, group: points };
-  }
-
-  const ranked = [...groups.values()]
-    .map(scoreGroup)
-    .sort((a,b) => b.score-a.score);
-
-  if (!ranked[0] || !ranked[0].group.length) return [];
-
-  const chosen = ranked[0].group
+  const chosen = [...byDay.values()]
     .filter(i => i.d >= 1 && i.d <= maxDay)
-    .sort((a,b) => a.cx-b.cx);
+    .sort((a,b)=>a.cx-b.cx);
+
+  /* Exigimos cobertura suficiente e preferimos um conjunto que contenha
+     o dia 1 e o último dia do mês. */
+  const days = [...new Set(chosen.map(i=>i.d))].sort((a,b)=>a-b);
+  if (days.length < Math.min(10,maxDay)) return [];
 
   const seen = new Set();
-  const out = [];
-
-  for (const item of chosen) {
-    if (seen.has(item.d)) continue;
+  return chosen.filter(item => {
+    if (seen.has(item.d)) return false;
     seen.add(item.d);
-
-    out.push({
-      ...item,
-      day: item.d,
-      date: new Date(year, monthIndex, item.d),
-      key: `${year}-${String(monthIndex + 1).padStart(2,'0')}-${String(item.d).padStart(2,'0')}`
-    });
-  }
-
-  return out;
+    return true;
+  }).map(item => ({
+    ...item,
+    day:item.d,
+    date:new Date(year,monthIndex,item.d),
+    key:`${year}-${String(monthIndex+1).padStart(2,'0')}-${String(item.d).padStart(2,'0')}`
+  }));
 }
 
 function rowItems(items, y) {
