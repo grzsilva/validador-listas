@@ -132,6 +132,8 @@ button:hover{border-color:var(--ac)}
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!-- Carrega o worker como script comum: o pdf.js processa na própria página e não precisa criar um Web Worker (bloqueado em alguns ambientes). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 'use strict';
@@ -657,6 +659,64 @@ function expandPdfTextItems(items) {
   return out;
 }
 
+
+const DIGESTS = {
+  '2b0e03021a':'SHA-1',
+  '608648016503040201':'SHA-256','608648016503040202':'SHA-384','608648016503040203':'SHA-512'
+};
+function errText(e) {
+  const m = e && e.message ? e.message : 'Erro desconhecido.';
+  return /worker/i.test(m)
+    ? 'O leitor de imagens (OCR) não funciona nesta prévia do Claude. Use a versão publicada no Vercel ou envie o PDF com texto.'
+    : m;
+}
+/* ASN.1 (BER) com comprimento indefinido aninhado, como nos CMS do gov.br. */
+function derX(b,p){const t=b[p];let l=b[p+1],h=2;
+  if(l===128){let q=p+2;while(!(b[q]===0&&b[q+1]===0))q=derX(b,q).e;return{t,s:p+2,e:q+2,p,ind:1,ce:q}}
+  if(l&128){const n=l&127;l=0;for(let i=0;i<n;i++)l=l*256+b[p+2+i];h=2+n}
+  return{t,s:p+h,e:p+h+l,p}}
+function kidsX(b,n){const a=[],lim=n.ind?n.ce:n.e;let p=n.s;while(p<lim){const k=derX(b,p);a.push(k);p=k.e}return a}
+function sigSignerName(hex) {
+  const b = new Uint8Array(hex.match(/../g).map(h => parseInt(h,16)));
+  const sd = kidsX(b, kidsX(b, kidsX(b, derX(b,0))[1])[0]);
+  const key = n => [...b.slice(n.p,n.e)].join(',');
+  const cs = kidsX(b, sd.find(k => k.t === 0xA0)).map(c => {
+    const ch = kidsX(b, kidsX(b,c)[0]), o = ch[0].t === 0xA0 ? 1 : 0;
+    return {iss:key(ch[o+2]), sub:key(ch[o+4]), cn:cnOf(b,ch[o+4])};
+  });
+  const leaf = cs.find(c => !cs.some(x => x !== c && x.iss === c.sub)) || cs[0];
+  return leaf ? leaf.cn.replace(/:\s*\d+\s*$/,'').trim() : '';
+}
+async function checkSigIntegrity(buf) {
+  const u8 = new Uint8Array(buf), txt = new TextDecoder('latin1').decode(u8), out = [];
+  const re = /\/Contents\s*<([0-9A-Fa-f]{200,})>/g;
+  let m;
+  while ((m = re.exec(txt))) {
+    let nome = '';
+    try {
+      nome = sigSignerName(m[1]);
+      const w = txt.slice(Math.max(0,m.index-900), m.index+m[0].length+900);
+      const br = /\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/.exec(w);
+      if (!br) { out.push({nome, ok:null}); continue; }
+      const [a,b,c,d] = br.slice(1).map(Number);
+      const data = new Uint8Array(b+d);
+      data.set(u8.subarray(a,a+b),0); data.set(u8.subarray(c,c+d),b);
+      const bytes = new Uint8Array(m[1].match(/../g).map(h => parseInt(h,16)));
+      const sd = kidsX(bytes, kidsX(bytes, kidsX(bytes, derX(bytes,0))[1])[0]);
+      const si = kidsX(bytes, kidsX(bytes, sd[sd.length-1])[0]);
+      const hx = n => [...bytes.slice(n.s,n.e)].map(x => x.toString(16).padStart(2,'0')).join('');
+      const alg = DIGESTS[hx(kidsX(bytes,si[2])[0])];
+      const attrs = kidsX(bytes, si.find(k => k.t === 0xA0));
+      const md = attrs.map(at => kidsX(bytes,at)).find(k => hx(k[0]) === '2a864886f70d010904');
+      if (!alg || !md || !crypto.subtle) { out.push({nome, ok:null}); continue; }
+      const want = hx(kidsX(bytes, md[1])[0]);
+      const got = [...new Uint8Array(await crypto.subtle.digest(alg, data))].map(x => x.toString(16).padStart(2,'0')).join('');
+      out.push({nome, ok: want === got});
+    } catch (e) { out.push({nome, ok:null}); }
+  }
+  return out;
+}
+
 async function extract(file) {
   const buf = await file.arrayBuffer();
 
@@ -689,6 +749,7 @@ async function extract(file) {
   const allItems = [];
   const sigs = await readSigs(buf);
   let usedOcr = false;
+  const imagePages = [];
 
   for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
     const pg = await pdf.getPage(pageNo);
@@ -711,29 +772,20 @@ async function extract(file) {
     if (pageItems.length >= 12) {
       allItems.push(...pageItems);
     } else {
-      const vp = pg.getViewport({scale:2.6});
-      const cv = document.createElement('canvas');
-      cv.width = Math.ceil(vp.width);
-      cv.height = Math.ceil(vp.height);
-
-      await pg.render({
-        canvasContext:cv.getContext('2d',{willReadFrequently:true}),
-        viewport:vp
-      }).promise;
-
-      const ocr = await ocrItems(cv);
-      ocr.forEach(i => i.page = pageNo);
-      allItems.push(...ocr);
-      usedOcr = true;
+      imagePages.push(pageNo);
     }
   }
+  const integrity = await checkSigIntegrity(buf);
 
   return {
     items:allItems,
     gridItems:expandPdfTextItems(allItems),
     sigs,
     ocr:usedOcr ? 1 : 0,
-    img:0
+    img:0,
+    imagePages,
+    integrity,
+    numPages:pdf.numPages
   };
 }
 
@@ -885,57 +937,81 @@ function parseReference(items) {
  * Aceita nomes completos, plurais, "terça-feira", abreviações e 2ª/5ª.
  */
 function extractPeriodDays(per) {
-  let raw = String(per || '')
+  const raw = String(per || '')
     .replace(/[–—−]/g,'-')
     .replace(/([a-záéíóúãõç])([A-ZÁÉÍÓÚÃÕÇ])/g,'$1 $2')
     .replace(/([0-9])([a-záéíóúãõç])/gi,'$1 $2')
-    .replace(/([a-záéíóúãõç])([0-9])/gi,'$1 $2')
-    .replace(/\b(?:dia|dias)\s+da\s+semana\b/ig,' semana ')
-    .replace(/\bvez(?:es)?\s+(?:por|na)\s+semana\b/ig,' vezes na semana ')
-    .replace(/\bsemana(?=(?:domingo|segunda|segunda-feira|seg|terça|terca|ter|quarta|qua|quinta|qui|sexta|sex|sábado|sabado|sab)(?:\b|-))/ig,'semana ');
-
-  const text = norm(raw)
-    .replace(/\b(?:feira|feiras)\b/g,' ')
-    .replace(/\s+/g,' ')
-    .trim();
+    .replace(/([a-záéíóúãõç])([0-9])/gi,'$1 $2');
+  const text = norm(raw).replace(/\b(?:feira|feiras)\b/g,' ').replace(/\s+/g,' ').trim();
 
   const days = [];
   const add = n => { if (n >= 0 && n <= 6 && !days.includes(n)) days.push(n); };
+  const fill = (a,b) => { let d = a, k = 0; while (k++ < 8) { add(d); if (d === b) break; d = (d + 1) % 7; } };
+  const dashPairs = [];
 
-  // Nomes completos e formas abreviadas mais comuns em PDF/OCR.
-  const aliases = [
-    [/\b(?:domingo|dom)\b/gi,0],
-    [/\b(?:segunda|seg)\b/gi,1],
-    [/\b(?:terca|terça|ter)\b/gi,2],
-    [/\b(?:quarta|qua)\b/gi,3],
-    [/\b(?:quinta|qui)\b/gi,4],
-    [/\b(?:sexta|sex)\b/gi,5],
-    [/\b(?:sabado|sábado|sab)\b/gi,6]
-  ];
-  for (const [re,n] of aliases) if (re.test(text)) add(n);
-
-  // 1ª=domingo ... 7ª=sábado; também tolera OCR que remova o ordinal.
-  for (const m of text.matchAll(/(?:^|[\s,;\/\-])([1-7])\s*(?:ª|º|a)?(?=$|[\s,;\/\-])/gi)) {
-    // Não interpretar números como dia do mês se não houver contexto de periodicidade.
-    if (/\b(?:vez|vezes|semana|semanal|periodicidade|dias?)\b/i.test(text)) add(Number(m[1])-1);
+  // Nomes completos, plurais, abreviações e erros leves de OCR (1 letra).
+  const WORD = {domingo:0,dom:0,segunda:1,seg:1,terca:2,ter:2,quarta:3,qua:3,quinta:4,qui:4,sexta:5,sex:5,sabado:6,sab:6};
+  const FULL = ['domingo','segunda','terca','quarta','quinta','sexta','sabado'];
+  const lv = (a,b) => { let p = [...Array(b.length+1).keys()]; for (let i=1;i<=a.length;i++){ const c=[i]; for (let j=1;j<=b.length;j++) c[j]=Math.min(p[j]+1,c[j-1]+1,p[j-1]+(a[i-1]===b[j-1]?0:1)); p=c; } return p[b.length]; };
+  const dayOf = w => {
+    const t = w.replace(/s$/,'');
+    if (t in WORD) return WORD[t];
+    if (w in WORD) return WORD[w];
+    if (t.length >= 5) { const k = FULL.findIndex(f => lv(t,f) <= 1); if (k >= 0) return k; }
+    return -1;
+  };
+  const hits = [];
+  for (const m of text.matchAll(/[a-z]{3,}/g)) {
+    const d = dayOf(m[0]);
+    if (d >= 0) hits.push({d, s:m.index, e:m.index+m[0].length});
   }
+  hits.forEach((h,i) => {
+    add(h.d);
+    const nx = hits[i+1];
+    if (!nx) return;
+    const mid = text.slice(h.e, nx.s).trim();
+    if (/^(?:a|ate|ao|as|ate a)$/.test(mid)) fill(h.d, nx.d);
+    else if (mid === '-') dashPairs.push([h.d,nx.d]);
+  });
 
-  // Expressões do tipo "2 e 4", "2,4", "2/4" ou "2 - 4".
+  // Ordinais: 2ª, 3º, 4a, 2ª/4ª, 2ª a 6ª (1ª=domingo ... 7ª=sábado).
+  for (const m of text.matchAll(/(?:^|[\s,;\/\-&+|])([1-7])\s*(?:ª|º|a|o)(?=$|[\s,;\/\-&+|])/gi)) add(Number(m[1])-1);
+  for (const m of text.matchAll(/([1-7])\s*(?:ª|º)\s*(?:a|ate|ao|as)\s*([1-7])\s*(?:ª|º)/gi)) fill(Number(m[1])-1, Number(m[2])-1);
+
+  // Números soltos ("2 e 4", "2,4", "2/4") só com contexto de periodicidade.
   if (/\b(?:vez|vezes|semana|semanal|periodicidade|dias?)\b/i.test(text)) {
-    const nums = [...text.matchAll(/(?:^|[\s,;\/\-])([1-7])(?=\s*(?:e|,|\/|\-|$))/gi)].map(m=>Number(m[1])-1);
-    nums.forEach(add);
-    const pair = text.match(/\b([1-7])\s*(?:e|,|\/|\-)\s*([1-7])\b/i);
+    for (const m of text.matchAll(/(?:^|[\s,;\/\-&+|])([1-7])(?=\s*(?:e|,|;|\/|\-|&|\+|\||$))/gi)) add(Number(m[1])-1);
+    const pair = text.match(/\b([1-7])\s*(?:e|,|;|\/|\-|&|\+)\s*([1-7])\b/i);
     if (pair) { add(Number(pair[1])-1); add(Number(pair[2])-1); }
   }
 
-  days.sort((a,b)=>a-b);
-  const fq = text.match(/\b(\d{1,2})\s*(?:x|vez|vezes)\b/i) ||
-             text.match(/\b(\d{1,2})\s*(?:dias?)\s*(?:por|na)\s*semana\b/i);
+  // Expressões coletivas.
+  if (/\b(?:segunda a sexta|dias uteis)\b/.test(text)) fill(1,5);
+  if (/\b(?:todos os dias|todo dia|diariamente)\b/.test(text)) fill(0,6);
 
-  return { days, frequency:fq ? Number(fq[1]) : null, text };
+  // Frequência: 2 vezes, 02x, duas vezes, 2 dias por semana, 2 aulas por semana.
+  const NUM = {uma:1,um:1,duas:2,dois:2,tres:3,quatro:4,cinco:5,seis:6,sete:7};
+  const fq = text.match(/\b(\d{1,2})\s*(?:x|vez|vezes|dias?|aulas?|encontros?)\b/i);
+  const fw = text.match(/\b(uma|um|duas|dois|tres|quatro|cinco|seis|sete)\s+(?:vez|vezes|dias?|aulas?|encontros?)\b/i);
+  const frequency = fq ? Number(fq[1]) : fw ? NUM[fw[1].toLowerCase()] : null;
+
+  // "Seg-Qua" pode ser lista (seg e qua) ou intervalo (seg a qua): a frequência decide.
+  if (frequency != null && days.length !== frequency && dashPairs.length) {
+    const alt = days.slice(), keep = days.slice();
+    days.length = 0; keep.forEach(add); dashPairs.forEach(([a,b]) => fill(a,b));
+    if (days.length !== frequency) { days.length = 0; keep.forEach(add); }
+  }
+
+  days.sort((a,b)=>a-b);
+  return { days, frequency, text };
 }
 
 /* Extrai campos mesmo quando o PDF separa rótulo e valor em objetos de texto. */
+function isGeneralCoordinatorLabel(value){
+  const s = norm(String(value || '').replace(/:$/,'')).replace(/\s+/g,' ').trim();
+  return /^coordenador(?: geral| geral da| geral do| geral de)\b/.test(s);
+}
+
 function fieldLabelRegex(labels) {
   return new RegExp(
     '^(' + labels
@@ -947,7 +1023,8 @@ function fieldLabelRegex(labels) {
 
 function isHeaderLabelText(value) {
   const s = norm(String(value || '').replace(/:$/,''));
-  return /^(?:nucleo|turma|modalidade|professor|instrutor|coordenador|auxiliar|horario|periodicidade|mes|carga horaria)$/.test(s);
+  if (isGeneralCoordinatorLabel(s)) return true;
+  return /^(?:nucleo|turma|modalidade|professor|instrutor|coordenador|auxiliar|monitor|horario|periodicidade|mes|carga horaria)$/.test(s);
 }
 
 function cleanFieldValue(value) {
@@ -969,6 +1046,9 @@ function headerLabelHits(items, labels){
   return (items || []).filter(i => {
     const raw = String(i.s || '').trim();
     const bare = norm(raw.replace(/:$/,''));
+    // "COORDENADOR GERAL" pertence à assinatura do coordenador geral.
+    // Nunca o tratar como o coordenador do núcleo.
+    if (wanted.includes('coordenador') && isGeneralCoordinatorLabel(raw)) return false;
     return wanted.includes(bare) || re.test(raw);
   }).sort((a,b)=>(a.page||0)-(b.page||0)||a.y-b.y||a.x-b.x);
 }
@@ -984,68 +1064,45 @@ function isHeaderNoise(s){
 
 function personOnly(value){
   let s = cleanFieldValue(value);
-  s = s.replace(/\b(?:nucleo|turma|modalidade|professor|instrutor|auxiliar|coordenador|horario|periodicidade|mes|carga horaria)\s*:?/ig,' ');
-  s = s.replace(/\b(?:ausente|presente|fim de semana|% presenca|presenca)\b.*$/i,' ');
+  if (isGeneralCoordinatorLabel(s)) return '';
+  // O valor de uma pessoa termina no próximo rótulo de cabeçalho.
+  // Nunca removemos apenas o rótulo e deixamos o conteúdo do campo seguinte.
+  s = s.split(/\b(?:nucleo|turma|modalidade|professor|instrutor|auxiliar|coordenador|monitor|horario|periodicidade|mes|carga horaria)\s*:?/i)[0];
+  s = s.split(/\b(?:ausente|presente|fim de semana|% presenca|presenca)\b/i)[0];
   s = s.replace(/\b\d+\b/g,' ');
-  s = s.replace(/\s+/g,' ').trim();
+  s = s.replace(/[:;|]+/g,' ').replace(/\s+/g,' ').trim();
   return s;
 }
 
 function horarioOnly(value){
-  /*
-   * O horário do cabeçalho não precisa estar em um padrão único.
-   * Exemplos aceitos: 8h às 9h30, 08:00-09:30, 8hrs as 9h30,
-   * 8 horas às 9 horas, 8 às 9:30, 08:00 até 09:30 e também
-   * descrições textuais como "período da manhã".
-   *
-   * Regra importante: se o campo existir, NÃO descartamos o conteúdo
-   * apenas porque não conseguimos convertê-lo em minutos.
-   */
+  /* Nunca trate números soltos da grade como horas. Só normalizamos horários
+     quando há h/hr/hrs/hora(s), "HH:MM" ou um intervalo explícito. */
   let s = cleanFieldValue(String(value || ''))
     .replace(/[–—−]/g,'-')
     .replace(/\s+/g,' ')
     .trim();
-
   if (!s) return '';
 
-  // Remove somente rótulos de outros campos que possam ter vindo no mesmo objeto.
-  s = s.replace(/\b(?:nucleo|turma|modalidade|professor|instrutor|coordenador|auxiliar|horario|periodicidade|mes|carga horaria)\s*:?/ig,' ');
-  s = s.replace(/\s+/g,' ').trim();
+  s = s.replace(/\b(?:nucleo|turma|modalidade|professor|instrutor|coordenador|auxiliar|monitor|horario|periodicidade|mes|carga horaria)\s*:?/ig,' ')
+       .replace(/\s+/g,' ').trim();
 
-  // Formas numéricas de horário, incluindo "hrs", "hr", "hora(s)" e minutos opcionais.
-  const time = '(?:[01]?\\d|2[0-3])\\s*(?::\\s*[0-5]\\d|h(?:rs?|oras?)?(?:\\s*[0-5]\\d)?)?';
-  const timeRe = new RegExp('\\b(' + time + ')\\b','gi');
-  const matches = [...s.matchAll(timeRe)];
+  const token = '(?:[01]?\\d|2[0-3])(?:\\s*(?::\\s*[0-5]\\d|h(?:rs?|oras?)?(?:\\s*[0-5]\\d)?))?';
+  const range = new RegExp('\\b(' + token + ')\\s*(?:às|as|até|ate|a|-)\\s*(' + token + ')\\b','i');
+  const rm = s.match(range);
+  if (rm) return `${rm[1].replace(/\\s+/g,'').toLowerCase()} às ${rm[2].replace(/\\s+/g,'').toLowerCase()}`;
 
-  if (matches.length >= 2) {
-    const first = matches[0][1].replace(/\\s+/g,'').toLowerCase();
-    const second = matches[1][1].replace(/\\s+/g,'').toLowerCase();
-    return `${first} às ${second}`;
-  }
+  const explicit = new RegExp('\\b(?:[01]?\\d|2[0-3])\\s*(?::\\s*[0-5]\\d|h(?:rs?|oras?)?(?:\\s*[0-5]\\d)?)\\b','gi');
+  const ex = [...s.matchAll(explicit)].map(m => m[0].replace(/\\s+/g,'').toLowerCase());
+  if (ex.length >= 2) return `${ex[0]} às ${ex[1]}`;
 
-  // Padrão frequente: "8 às 9h30", no qual o primeiro horário é apenas a hora.
-  const range = s.match(/\\b((?:[01]?\\d|2[0-3])(?:\\s*(?:h|hrs?|horas?))?)\\s*(?:às|as|a|ate|até|-|–|—)\\s*((?:[01]?\\d|2[0-3])(?:\\s*(?::\\s*[0-5]\\d|h(?:rs?|oras?)?(?:\\s*[0-5]\\d)?))?)\\b/i);
-  if (range) return `${range[1].replace(/\\s+/g,'').toLowerCase()} às ${range[2].replace(/\\s+/g,'').toLowerCase()}`;
-
-  // Não é um horário convencional, mas continua sendo uma informação válida
-  // do campo. Mantemos o texto para a conferência manual.
   return cleanFieldValue(s);
 }
 
 function periodicityOnly(value){
-  let s = norm(String(value || ''));
-  s = s.replace(/-/g,' ');
-
-  const names = '(?:domingo|dom|segunda(?: feira)?|segunda-feira|seg|terça(?: feira)?|terca(?: feira)?|ter|quarta(?: feira)?|qua|quinta(?: feira)?|qui|sexta(?: feira)?|sex|sábado(?: feira)?|sabado(?: feira)?|sab)';
-  const full = new RegExp('((?:\\d{1,2}\\s*(?:x|vez(?:es)?)(?:\\s+(?:por|na)\\s+semana)?\\s*)?(?:'+names+')(?:(?:\\s*(?:e|,|/|-)\\s*)'+names+')*)','i');
-  const m = s.match(full);
-  if (m) {
-    const out = m[1].replace(/\s+/g,' ').trim();
-    return out;
-  }
-
-  const numeric = s.match(/(?:\d{1,2}\s*(?:vez(?:es)?|x)\s*(?:por|na)\s*semana\s*)?(?:[1-7]\s*(?:ª|º|a)?)(?:\s*(?:e|,|\/|-)\s*[1-7]\s*(?:ª|º|a)?)+/i);
-  return numeric ? numeric[0].replace(/\s+/g,' ').trim() : '';
+  let s = cleanFieldValue(value)
+    .split(/\b(?:n[uú]cleo|turma|modalidade|professor|instrutor|auxiliar|coordenador|monitor|hor[aá]rio|m[eê]s|carga hor[aá]ria|ausente|presente|benefici[aá]do)\b/i)[0];
+  s = String(s || '').replace(/^\s*periodicidade\s*:?\s*/i,'').replace(/\s+/g,' ').trim();
+  return s && extractPeriodDays(s).days.length ? s : '';
 }
 
 /*
@@ -1053,86 +1110,126 @@ function periodicityOnly(value){
  * A regra é: rótulo -> mesma linha -> próximo rótulo/limite -> valor.
  */
 function readFieldRobust(items, labels, options={}) {
+  /*
+   * Leitura por CÉLULA do cabeçalho. Nunca usamos uma largura fixa como
+   * "260px para a direita", porque isso é justamente o que fazia Turma
+   * receber o mês e Horário receber os números da grade.
+   *
+   * Estratégia:
+   *  1. localizar o rótulo;
+   *  2. descobrir os demais rótulos na mesma linha;
+   *  3. criar o intervalo [fim do rótulo, início do próximo rótulo);
+   *  4. ler somente os textos dentro desse intervalo;
+   *  5. aplicar o saneamento específico do tipo do campo.
+   */
   const hits = headerLabelHits(items, labels);
   if (!hits.length) return '';
 
   const kind = norm(options.kind || '');
-  const yTol = Number(options.sameRowTolerance ?? 4);
-  const maxWidth = Number(options.maxWidth || (kind === 'horario' ? 230 : 360));
-
+  const yTol = Number(options.sameRowTolerance ?? 6);
   const all = (items || []).slice().sort((a,b)=>(a.page||0)-(b.page||0)||a.y-b.y||a.x-b.x);
-  const isStop = s => isHeaderLabelText(s) || MES.some(m => norm(m) === norm(String(s||''))) || /^(?:ausente|presente|fim de semana|% presenca)$/i.test(norm(String(s||'')));
+
+  const allLabels = [
+    'núcleo','nucleo','turma','modalidade','professor','instrutor',
+    'coordenador','coordenador geral','auxiliar','monitor','horário','horario',
+    'periodicidade','mês','mes','carga horária','carga horaria'
+  ];
+
+  const labelHits = headerLabelHits(all, allLabels);
+  const isLabel = i => labelHits.some(h =>
+    h !== i && (h.page||0)===(i.page||0) &&
+    Math.abs(h.y-i.y)<=yTol && Math.abs(h.x-i.x)<2
+  ) || isHeaderLabelText(i.s);
 
   const candidates=[];
 
   for (const hit of hits) {
-    const raw=String(hit.s||'').trim();
-    const m=raw.match(fieldLabelRegex(labels));
-    if (m && cleanFieldValue(m[2])) {
-      let v=cleanFieldValue(m[2]);
-      if(kind==='horario') v=horarioOnly(v);
-      else if(kind==='person') v=personOnly(v);
-      if(v) candidates.push({value:v,score:130});
-      continue;
-    }
-
     const page=hit.page||0;
-    const startX=hit.x+(hit.w||0)+1;
-    const row=all.filter(i=>{
-      if((i.page||0)!==page || i===hit) return false;
-      if(Math.abs(i.y-hit.y)>yTol) return false;
-      if(i.x < startX || i.x > startX+maxWidth) return false;
-      return true;
-    }).sort((a,b)=>a.x-b.x);
+    const raw=String(hit.s||'').trim();
+    const inline=raw.match(fieldLabelRegex(labels));
+    const labelEnd=hit.x+(hit.w||0);
 
-    let picked=[];
-    for(const item of row){
-      const txt=cleanFieldValue(item.s);
-      if(!txt || isStop(txt)) break;
-      if(kind==='horario'){
-        // O conteúdo pode ser "8hrs as 9h30", "manhã", "integral", etc.
-        // O filtro de rótulos evita puxar as demais células do cabeçalho.
-        if(!isHeaderLabelText(txt) && !/^(?:ausente|presente|fim de semana|% presenca)$/i.test(norm(txt))) picked.push(txt);
-      } else if(kind==='person'){
-        if(/^[A-Za-zÀ-ÿ'’-]+(?:\s+[A-Za-zÀ-ÿ'’-]+)*$/.test(txt)) picked.push(txt);
-        else break;
-      } else {
-        picked.push(txt);
+    /* Próximo rótulo da MESMA LINHA. Ele é a fronteira da célula. */
+    const nextLabels = labelHits
+      .filter(h =>
+        (h.page||0)===page && h!==hit &&
+        Math.abs(h.y-hit.y)<=yTol &&
+        h.x>labelEnd+0.1
+      )
+      .sort((a,b)=>a.x-b.x);
+
+    const monthBoundary = all
+      .filter(i =>
+        (i.page||0)===page && i.x>labelEnd+0.1 &&
+        MES.some(m => norm(String(i.s||''))===norm(m))
+      )
+      .sort((a,b)=>a.x-b.x)[0];
+
+    const boundaries = [
+      ...(nextLabels.length ? [nextLabels[0].x-1] : []),
+      ...(monthBoundary ? [monthBoundary.x-1] : [])
+    ].sort((a,b)=>a-b);
+    const cellEnd = boundaries.length ? boundaries[0] : Infinity;
+
+    let value = inline && cleanFieldValue(inline[2])
+      ? cleanFieldValue(inline[2])
+      : '';
+
+    if (!value) {
+      const row = all
+        .filter(i =>
+          (i.page||0)===page && i!==hit &&
+          Math.abs(i.y-hit.y)<=yTol &&
+          // Não dependa de i.w do rótulo: alguns PDFs informam uma largura
+          // exagerada para o texto "COORDENADOR:" e isso fazia o valor ser
+          // perdido. A fronteira real continua sendo o próximo rótulo.
+          i.x>=hit.x+4 && i.x<cellEnd
+        )
+        .sort((a,b)=>a.x-b.x);
+
+      const pieces=[];
+      for (const item of row) {
+        const txt=cleanFieldValue(item.s);
+        if (!txt) continue;
+        if (isLabel(item)) break;
+        if (MES.some(m => norm(m)===norm(txt)) && kind!=='nucleo') break;
+        if (/^(?:ausente|presente|fim de semana|% presenca)$/i.test(norm(txt))) break;
+        pieces.push(txt);
       }
-      if(picked.length>=8) break;
+      value=pieces.join(' ').trim();
     }
 
-    let value=picked.join(' ').trim();
-    if(kind==='horario') value=horarioOnly(value);
+    /* Alguns modelos colocam o valor logo abaixo do rótulo.
+       Mantemos a mesma fronteira horizontal da célula. */
+    if (!value) {
+      const below = all
+        .filter(i =>
+          (i.page||0)===page && i!==hit &&
+          i.y>hit.y && i.y-hit.y<=18 &&
+          i.x>=hit.x-2 && i.x<cellEnd &&
+          !isHeaderLabelText(i.s)
+        )
+        .sort((a,b)=>a.y-b.y||a.x-b.x);
+      value=below.slice(0,6).map(i=>i.s).join(' ').trim();
+    }
+
     if(kind==='person') value=personOnly(value);
-    if(kind==='periodicidade') value=periodicityOnly(value);
+    else if(kind==='horario') value=horarioOnly(value);
+    else if(kind==='periodicidade') value=periodicityOnly(value);
+    else value=cleanFieldValue(value);
 
     if(value) {
       candidates.push({
         value,
-        score:120-Math.abs((row[0]?.y ?? hit.y)-hit.y)*4-(row[0]?.x ?? startX-hit.x)/100
+        score: inline && cleanFieldValue(inline[2]) ? 150 : (nextLabels.length ? 135 : 115),
+        x:hit.x, y:hit.y
       });
-      continue;
-    }
-
-    /* Alguns PDFs agrupam o rótulo e o valor no objeto seguinte, embaixo. */
-    const below=all.filter(i=>
-      (i.page||0)===page && i!==hit && i.y>hit.y && i.y-hit.y<=18 &&
-      i.x>=hit.x-2 && i.x<=hit.x+maxWidth && !isStop(i.s)
-    ).sort((a,b)=>a.y-b.y||a.x-b.x);
-
-    if(below.length){
-      let v=below.slice(0,6).map(i=>i.s).join(' ');
-      if(kind==='horario') v=horarioOnly(v);
-      else if(kind==='person') v=personOnly(v);
-      else if(kind==='periodicidade') v=periodicityOnly(v);
-      if(v) candidates.push({value:cleanFieldValue(v),score:85});
     }
   }
 
   const valid=v=>{
     if(!v) return false;
-    if(kind==='person') return v.split(/\s+/).length>=2 && /[A-Za-zÀ-ÿ]/.test(v);
+    if(kind==='person') return /[A-Za-zÀ-ÿ]/.test(v);
     if(kind==='horario') return !!cleanFieldValue(v);
     if(kind==='periodicidade') return periodicityOnly(v)!=='';
     return /[A-Za-zÀ-ÿ0-9]/.test(v);
@@ -1148,7 +1245,11 @@ function hasHeaderLabel(items, labels) {
   return (items || []).some(i => {
     const raw = String(i.s || '').trim();
     const bare = norm(raw.replace(/:$/,''));
-    return wanted.includes(bare) || wanted.some(w => new RegExp('^' + w.replace(/[.*+?^${}()|[\\]\\]/g,'\\$&') + '\\s*:?', 'i').test(raw));
+    if (wanted.includes('coordenador') && isGeneralCoordinatorLabel(raw)) return false;
+    return wanted.includes(bare) || wanted.some(w => {
+      const re = new RegExp('^' + w.replace(/[.*+?^${}()|[\]\\]/g,'\\$&') + '\\s*:?', 'i');
+      return re.test(raw);
+    });
   });
 }
 
@@ -1480,32 +1581,37 @@ function formatHours(minutes) {
 }
 
 function parseScheduleDuration(horario) {
-  const s = String(horario || '').replace(/[–—−]/g,'-');
-  const candidates = [
-    /\b(?:[01]?\d|2[0-3])\s*:\s*[0-5]\d\b/gi,
-    /\b(?:[01]?\d|2[0-3])\s*(?:h|hr|hrs|hora|horas)\s*(?:[0-5]\d)?\b/gi
-  ];
-  const found=[];
-  for (const re of candidates) {
-    for (const m of s.matchAll(re)) {
-      const min=parseTimeToMinutes(m[0]);
-      if (min!=null && !found.includes(min)) found.push(min);
+  const s = String(horario || '').replace(/[–—−]/g,'-').replace(/\s+/g,' ').trim();
+  if (!s) return null;
+
+  const token = '(?:[01]?\\d|2[0-3])(?:\\s*(?::\\s*[0-5]\\d|h(?:rs?|oras?)?(?:\\s*[0-5]\\d)?))?';
+  const range = new RegExp('\\b(' + token + ')\\s*(?:às|as|até|ate|a|-)\\s*(' + token + ')\\b','i');
+  const rm = s.match(range);
+  if (rm) {
+    const tokenMinutes = raw => {
+      const explicit = parseTimeToMinutes(raw);
+      if (explicit != null) return explicit;
+      const m = String(raw).match(/^(?:[01]?\d|2[0-3])$/);
+      return m ? Number(m[0]) * 60 : null;
+    };
+    const a=tokenMinutes(rm[1]), b=tokenMinutes(rm[2]);
+    if (a!=null && b!=null) {
+      let end=b; if (end<a) end+=24*60;
+      const d=end-a; if (d>0 && d<=12*60) return d;
     }
   }
-  // Preserva a ordem em que os horários aparecem no texto.
-  const ordered=[];
-  const all = [...s.matchAll(/\b(?:[01]?\d|2[0-3])\s*(?::\s*[0-5]\d|(?:h|hr|hrs|hora|horas)\s*(?:[0-5]\d)?)\b/gi)];
-  for (const m of all) {
-    const min=parseTimeToMinutes(m[0]);
-    if (min!=null && !ordered.includes(min)) ordered.push(min);
-  }
-  const times = ordered.length >= 2 ? ordered : found;
-  if (times.length < 2) return null;
 
-  let start = times[0], end = times[1];
-  if (end < start) end += 24*60;
-  const duration = end - start;
-  return duration > 0 && duration <= 12*60 ? duration : null;
+  const explicit = new RegExp('\\b(?:[01]?\\d|2[0-3])\\s*(?::\\s*[0-5]\\d|h(?:rs?|oras?)?(?:\\s*[0-5]\\d)?)\\b','gi');
+  const times=[];
+  for (const m of s.matchAll(explicit)) {
+    const min=parseTimeToMinutes(m[0]);
+    if (min!=null && !times.includes(min)) times.push(min);
+  }
+  if (times.length>=2) {
+    let end=times[1]; if (end<times[0]) end+=24*60;
+    const d=end-times[0]; if (d>0 && d<=12*60) return d;
+  }
+  return null;
 }
 
 function readHeaderField(items, labels) {
@@ -1520,7 +1626,7 @@ function readHeaderField(items, labels) {
   return m ? m[2].trim() : '';
 }
 
-function validateHeader(items, mi, ano, dias, hdr, horario, periodicidade, turma) {
+function validateHeader(items, mi, ano, dias, hdr, horario, periodicidade, turma, nucleo, modalidade) {
   const checks = [];
   const add = (t,m) => checks.push({t,m});
 
@@ -1535,8 +1641,14 @@ function validateHeader(items, mi, ano, dias, hdr, horario, periodicidade, turma
     add('ok',`Cabeçalho: periodicidade identificada como ${dias.map(d => NS[d]).join(' e ')}.`);
   }
 
-  if (!turma) add('wa','Cabeçalho: turma não identificada.');
+  if (!nucleo) add('er','Cabeçalho: núcleo não identificado.');
+  else add('ok',`Cabeçalho: núcleo identificado como ${nucleo}.`);
+
+  if (!turma) add('er','Cabeçalho: turma não identificada.');
   else add('ok',`Cabeçalho: turma identificada como "${turma}".`);
+
+  if (!modalidade) add('wa','Cabeçalho: modalidade não identificada.');
+  else add('ok',`Cabeçalho: modalidade identificada como ${modalidade}.`);
 
   if (!horario) {
     add('wa','Cabeçalho: horário não identificado; não foi possível calcular a duração da aula.');
@@ -1648,6 +1760,14 @@ function calculateWorkload(ano, mi, dias, horario, alunos, holidays=[]) {
   };
 }
 
+function isNonBeneficiaryRowName(name){
+  const n = norm(String(name || '')).replace(/\s+/g,' ').trim();
+  if (!n) return true;
+  if (/^(?:geral|coordenador geral|coord(?:enador)? geral|assinatura|assinaturas|coordenador|instrutor|professor|monitor|auxiliar)$/.test(n)) return true;
+  if (/\b(?:coordenador geral|coord(?:enador)? geral)\b/.test(n)) return true;
+  return false;
+}
+
 function beneficiaryNameCheck(name) {
   const raw = String(name || '').trim();
   const clean = norm(raw)
@@ -1675,73 +1795,97 @@ function duplicateKey(name) {
     .trim();
 }
 
+function nameTokens(name) {
+  return duplicateKey(name).split(' ').filter(Boolean);
+}
+
 function nameSimilarity(a,b) {
-  const A = duplicateKey(a).split(' ').filter(Boolean);
-  const B = duplicateKey(b).split(' ').filter(Boolean);
+  const A = nameTokens(a);
+  const B = nameTokens(b);
   if (!A.length || !B.length) return 0;
   if (duplicateKey(a) === duplicateKey(b)) return 1;
-
   const sa = new Set(A), sb = new Set(B);
   const inter = [...sa].filter(x => sb.has(x)).length;
   return (2 * inter) / (sa.size + sb.size);
+}
+
+function likelySamePersonName(a,b) {
+  const A = nameTokens(a), B = nameTokens(b);
+  if (A.length < 2 || B.length < 2) return false;
+  // Para evitar falsos positivos, nomes semelhantes só entram como aviso
+  // quando começam e terminam com o mesmo nome/sobrenome e são muito próximos.
+  return A[0] === B[0] && A[A.length-1] === B[B.length-1] && nameSimilarity(a,b) >= 0.90;
 }
 
 function detectDuplicates(results) {
   const entries = [];
   results.forEach((r, blockIndex) => {
     (r.A || []).forEach((a, studentIndex) => {
+      if (isNonBeneficiaryRowName(a.nome)) return;
+      const key = duplicateKey(a.nome);
+      if (!key) return;
       entries.push({
         blockIndex,
+        result:r,
         studentIndex,
         nome:a.nome,
         turma:r.I?.Turma || `Bloco ${blockIndex+1}`,
         arquivo:r.__name || `Bloco ${blockIndex+1}`,
-        key:duplicateKey(a.nome)
+        key
       });
     });
   });
 
-  const exact = [];
+  const exactWithin = [];
+  const exactCross = [];
   const fuzzy = [];
-  const seenPairs = new Set();
+  const seen = new Set();
 
   for (let i=0; i<entries.length; i++) {
     for (let j=i+1; j<entries.length; j++) {
       const x=entries[i], y=entries[j];
-      if (!x.key || !y.key) continue;
+      const pair=`${i}|${j}`;
+      if (seen.has(pair)) continue;
+      seen.add(pair);
 
-      // Mesmo aluno no mesmo bloco.
       if (x.key === y.key) {
-        exact.push({a:x,b:y,within:x.blockIndex===y.blockIndex});
+        if (x.blockIndex === y.blockIndex) exactWithin.push({a:x,b:y,within:true});
+        else exactCross.push({a:x,b:y,within:false});
         continue;
       }
 
-      const pair = `${i}|${j}`;
-      if (seenPairs.has(pair)) continue;
-      const sim = nameSimilarity(x.nome,y.nome);
-      // Similaridade alta: aviso para conferência manual, não erro automático.
-      if (sim >= 0.88) {
-        seenPairs.add(pair);
-        fuzzy.push({a:x,b:y,similarity:sim});
+      // Semelhança nunca é tratada como duplicidade e nunca torna a lista
+      // "Com erros". Só mostramos uma atenção quando há forte evidência.
+      if (likelySamePersonName(x.nome,y.nome)) {
+        fuzzy.push({a:x,b:y,similarity:nameSimilarity(x.nome,y.nome)});
       }
     }
   }
 
-  return {entries, exact, fuzzy};
+  return {
+    entries,
+    exact: exactWithin,
+    exactWithin,
+    exactCross,
+    fuzzy
+  };
 }
 
 function listSummaryEvidence(results) {
   const d = detectDuplicates(results);
-  let h = `<div class="sec"><h3>Resumo das listas — inconsistências de duplicidade</h3>`;
-  if (!d.exact.length && !d.fuzzy.length) {
-    h += `<div class="alert-box ok"><strong>✓ Nenhuma duplicidade identificada.</strong> Não há beneficiários repetidos ou nomes altamente semelhantes entre as listas analisadas.</div>`;
+  let h = `<div class="sec"><h3>Resumo das listas — duplicidade de beneficiários</h3>`;
+  if (!d.exactWithin.length && !d.exactCross.length && !d.fuzzy.length) {
+    h += `<div class="alert-box ok"><strong>✓ Nenhuma duplicidade identificada.</strong> Não há nomes repetidos dentro das listas analisadas.</div>`;
   } else {
-    h += `<div class="alert-box er"><strong>✘ Inconsistência de duplicidade identificada.</strong> Abaixo estão os nomes que exigem conferência.</div><ul>`;
-    d.exact.forEach(x => {
-      h += `<li class="er"><b>Duplicidade:</b> ${esc(x.a.nome)} — ${esc(x.a.arquivo)} / ${esc(x.a.turma)} ↔ ${esc(x.b.arquivo)} / ${esc(x.b.turma)}.</li>`;
+    h += `<ul>`;
+    d.exactWithin.forEach(x => {
+      h += `<li class="er"><b>✘ Duplicidade real na mesma lista:</b> ${esc(x.a.nome)} aparece mais de uma vez em ${esc(x.a.arquivo)} / ${esc(x.a.turma)}.</li>`;
+    });
+    d.exactCross.forEach(x => {
+      h += `<li class="er"><b>✘ Mesmo beneficiário em listas diferentes:</b> ${esc(x.a.nome)} — ${esc(x.a.arquivo)} / ${esc(x.a.turma)} ↔ ${esc(x.b.arquivo)} / ${esc(x.b.turma)}. O mesmo nome aparece em mais de uma lista e exige conferência/correção.</li>`;
     });
     d.fuzzy.forEach(x => {
-      h += `<li class="wa"><b>Possível duplicidade:</b> ${esc(x.a.nome)} ↔ ${esc(x.b.nome)} — ${Math.round(x.similarity*100)}% de semelhança. Confirmar manualmente.</li>`;
+      h += `<li class="wa"><b>⚠ Nomes muito semelhantes:</b> ${esc(x.a.nome)} ↔ ${esc(x.b.nome)} — ${Math.round(x.similarity*100)}%. Apenas conferir manualmente; não é duplicidade confirmada.</li>`;
     });
     h += `</ul>`;
   }
@@ -1751,47 +1895,33 @@ function listSummaryEvidence(results) {
 
 function duplicateEvidence(results) {
   const d = detectDuplicates(results);
-  const total = d.exact.length + d.fuzzy.length;
-
-  let h = `<div class="sec">
-    <h3>Duplicidade de beneficiários entre blocos/turmas</h3>`;
+  const total = d.exactWithin.length + d.exactCross.length + d.fuzzy.length;
+  let h = `<div class="sec"><h3>Conferência de nomes/duplicidades</h3>`;
 
   if (!total) {
     h += `<div class="alert-box ok"><strong>✔ Nenhuma duplicidade identificada</strong>
-      Não foi encontrado o mesmo nome em mais de um bloco/turma, nem nomes altamente semelhantes.</div>`;
+      Não há beneficiários repetidos dentro da mesma lista.</div>`;
   } else {
     h += `<div class="dup-grid">`;
-
-    d.exact.forEach(x => {
-      const scope = x.within ? 'duplicidade dentro do mesmo bloco' : 'beneficiário encontrado em mais de um bloco/turma';
-      h += `<div class="alert-box er">
-        <strong>✘ Duplicidade</strong>
-        <b>${esc(x.a.nome)}</b><br>
-        ${esc(x.a.arquivo)} — ${esc(x.a.turma)}<br>
-        ${esc(x.b.arquivo)} — ${esc(x.b.turma)}<br>
-        <span class="small">${esc(scope)}</span>
-      </div>`;
+    d.exactWithin.forEach(x => {
+      h += `<div class="alert-box er"><strong>✘ Duplicidade confirmada na mesma lista</strong>
+        <b>${esc(x.a.nome)}</b><br>${esc(x.a.arquivo)} — ${esc(x.a.turma)}<br>
+        O mesmo nome aparece mais de uma vez na mesma lista.</div>`;
     });
-
+    d.exactCross.forEach(x => {
+      h += `<div class="alert-box er"><strong>✘ Mesmo beneficiário em listas diferentes</strong>
+        <b>${esc(x.a.nome)}</b><br>${esc(x.a.arquivo)} — ${esc(x.a.turma)}<br>
+        ↔ ${esc(x.b.arquivo)} — ${esc(x.b.turma)}<br>
+        O mesmo nome aparece em mais de uma lista e deve ser conferido/corrigido.</div>`;
+    });
     d.fuzzy.forEach(x => {
-      h += `<div class="alert-box wa">
-        <strong>! Possível duplicidade</strong>
-        <b>${esc(x.a.nome)}</b><br>
-        ${esc(x.a.arquivo)} — ${esc(x.a.turma)}<br>
-        ↔ <b>${esc(x.b.nome)}</b><br>
-        ${esc(x.b.arquivo)} — ${esc(x.b.turma)}<br>
-        <span class="small">Nomes semelhantes (${Math.round(x.similarity*100)}%). Confirme manualmente.</span>
-      </div>`;
+      h += `<div class="alert-box wa"><strong>⚠ Nomes semelhantes — revisão manual</strong>
+        <b>${esc(x.a.nome)}</b> ↔ <b>${esc(x.b.nome)}</b><br>
+        ${Math.round(x.similarity*100)}% de semelhança. Não é duplicidade confirmada.</div>`;
     });
-
     h += `</div>`;
   }
-
-  h += `<p class="date-note">
-    A comparação usa o nome normalizado (sem acentos e diferenças de caixa). 
-    Nomes semelhantes são apenas alertas; não são tratados como duplicidade definitiva.
-  </p></div>`;
-
+  h += `<p class="date-note">Critério: mesmo nome normalizado repetido na mesma lista = erro; mesmo nome normalizado presente em listas diferentes = erro; nomes apenas semelhantes = aviso para conferência; um único registro em uma única linha = não é duplicidade.</p></div>`;
   return h;
 }
 
@@ -1853,10 +1983,178 @@ function globalValidationEvidence(results) {
 }
 
 
+function personNeedsAttention(name){
+  const s = cleanFieldValue(name).replace(/\s+/g,' ').trim();
+  if (!s) return false;
+  const parts = s.split(/\s+/).filter(Boolean);
+  // Um único termo normalmente significa nome sem sobrenome.
+  return parts.length < 2;
+}
+
+function personLabelForRole(role){
+  if (role === 'Professor') return 'professor/instrutor';
+  if (role === 'Auxiliar') return 'auxiliar/monitor';
+  return 'coordenador';
+}
+
+
+function findPresenceSummaryColumns(items, headerY, dateXMax=0) {
+  /*
+   * Localiza as três colunas-resumo da direita da grade:
+   *   Ausente (A) | Presente (P) | % Presença
+   *
+   * O PDF pode entregar o cabeçalho como um único texto ou como vários
+   * objetos separados ("Ausente" + "(A)", "%" + "Presença", etc.).
+   * Por isso NÃO exigimos que todo o rótulo esteja no mesmo item.
+   */
+  const all = (items || []).map(i => ({
+    ...i,
+    raw: String(i.s || '').trim(),
+    n: norm(String(i.s || '').trim()),
+    cx: i.x + (i.w || 0) / 2
+  }));
+
+  const candidates = [];
+  for (const i of all) {
+    const ydist = Math.abs((i.y || 0) - headerY);
+    if (ydist > 110) continue;
+
+    let kind = null;
+    if (/\bausente\b/.test(i.n)) kind = 'A';
+    else if (/\bpresente\b/.test(i.n)) kind = 'P';
+    else if (/presenc|presença/.test(i.n) || /%/.test(i.raw)) kind = 'pct';
+    else if (/^\(?\s*a\s*\)?$/i.test(i.raw)) kind = 'A';
+    else if (/^\(?\s*p\s*\)?$/i.test(i.raw)) kind = 'P';
+
+    if (kind) candidates.push({kind, x:i.cx, y:i.y, score:ydist});
+  }
+
+  /* Reforço: quando "Ausente", "Presente" e "%" são itens separados,
+     usamos a ordem espacial das três colunas à direita do calendário. */
+  const right = all
+    .filter(i => i.cx > dateXMax + 5 && Math.abs((i.y || 0) - headerY) <= 110)
+    .sort((a,b) => a.cx-b.cx);
+
+  const explicit = {A:[], P:[], pct:[]};
+  candidates.forEach(c => explicit[c.kind].push(c));
+
+  const out = {};
+  for (const kind of ['A','P','pct']) {
+    if (explicit[kind].length) {
+      explicit[kind].sort((a,b)=>a.score-b.score || a.x-b.x);
+      out[kind] = explicit[kind][0];
+    }
+  }
+
+  /* Se algum rótulo não foi encontrado isoladamente, tente reconhecer
+     a sequência visual dos três títulos da área de resumo. */
+  if (!out.A || !out.P || !out.pct) {
+    const textRight = right.filter(i =>
+      /ausente|presente|presenc|%|^\(?[ap]\)?$/i.test(i.n) || /%/.test(i.raw)
+    );
+    for (let i=0; i<textRight.length; i++) {
+      const a=textRight[i], b=textRight[i+1], c=textRight[i+2];
+      if (!a || !b || !c) continue;
+      const combo = [a.n,b.n,c.n].join(' ');
+      if (/ausente/.test(combo) && /presente/.test(combo) && /presenc|%/.test(combo)) {
+        if (!out.A) out.A={kind:'A',x:a.cx,y:a.y,score:999};
+        if (!out.P) out.P={kind:'P',x:b.cx,y:b.y,score:999};
+        if (!out.pct) out.pct={kind:'pct',x:c.cx,y:c.y,score:999};
+        break;
+      }
+    }
+  }
+
+  return out;
+}
+
+function readPrintedPresenceTotals(rowItems, columns, dateXMax=0) {
+  if (!columns || !Object.keys(columns).length) return null;
+
+  const numeric = (rowItems || []).map((i,idx) => {
+    const raw = String(i.s || '').trim();
+    const clean = raw.replace(/\s+/g,'');
+    if (!/^\d+(?:[.,]\d+)?%?$/.test(clean)) return null;
+    const value = Number(clean.replace('%','').replace(',','.'));
+    if (!Number.isFinite(value)) return null;
+    return {
+      raw:clean,
+      value,
+      isPercent:/%$/.test(clean),
+      x:i.x+(i.w||0)/2,
+      idx
+    };
+  }).filter(Boolean);
+
+  if (!numeric.length) return null;
+
+  const out = {};
+  const used = new Set();
+  const positions = ['A','P','pct']
+    .map(k => columns[k]?.x)
+    .filter(x => Number.isFinite(x))
+    .sort((a,b)=>a-b);
+  const adjacentGap = positions.length > 1
+    ? positions.reduce((best,x,i,arr)=> i ? Math.min(best, x-arr[i-1]) : best, Infinity)
+    : 35;
+  /* O número impresso normalmente fica no centro da célula. Toleramos
+     mais distância para PDFs em que o cabeçalho/rótulo começa pela esquerda. */
+  const maxDist = Math.max(18, Math.min(55, adjacentGap * 0.95));
+
+  for (const kind of ['A','P','pct']) {
+    const col = columns[kind];
+    if (!col) continue;
+
+    const pool = numeric
+      .map(n => ({...n, dist:Math.abs(n.x-col.x)}))
+      .filter(n => !used.has(n.idx) && n.dist <= maxDist)
+      .filter(n => {
+        if (kind === 'pct') return n.isPercent || (n.value >= 0 && n.value <= 100);
+        return !n.isPercent && Number.isInteger(n.value) && n.value >= 0;
+      })
+      .sort((a,b)=>a.dist-b.dist);
+
+    if (pool.length) {
+      const hit=pool[0];
+      used.add(hit.idx);
+      out[kind]=hit.value;
+    }
+  }
+
+  return Object.keys(out).length ? out : null;
+}
+
+function describeQuantitativeError(name, counted, printed) {
+  const msgs = [];
+  if (printed.A != null && printed.A !== counted.a) {
+    msgs.push(`Ausentes (A): documento informa ${printed.A}, mas a grade contém ${counted.a}`);
+  }
+  if (printed.P != null && printed.P !== counted.p) {
+    msgs.push(`Presenças (P): documento informa ${printed.P}, mas a grade contém ${counted.p}`);
+  }
+
+  const total = counted.a + counted.p;
+  if (printed.pct != null && total > 0) {
+    const calc = counted.p / total * 100;
+    if (Math.abs(printed.pct - calc) > 1.01) {
+      msgs.push(`Percentual de presença: documento informa ${String(printed.pct).replace('.',',')}%, mas o cálculo correto é ${Math.round(calc)}% (${counted.p}/${total})`);
+    }
+  }
+
+  if (!msgs.length) return '';
+  return `QUANTITATIVO A/P OU PERCENTUAL INCORRETO — ${msgs.join('; ')}.`;
+}
+
 function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
   const C = [];
   const A = [];
   const I = {};
+
+  // Novo modelo Instituto Chaya: presença/falta identificadas como P/F.
+  // O F não deve ser tratado como caractere inválido do modelo antigo.
+  const pfMarks = (gridItems || items || []).filter(i => /^[PF]$/i.test(String(i.s || '').trim()));
+  const hasNewPFModel = pfMarks.some(i => /^F$/i.test(String(i.s || '').trim()));
+
   const gradeItems = gridItems && gridItems.length ? gridItems : items;
 
   const add = (t,m) => C.push({t,m});
@@ -1867,21 +2165,23 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
   const monthItem = items.find(i => MES.some(m => norm(m) === norm(i.s)));
   const CUT = monthItem ? monthItem.x : 1e9;
 
-  I['Núcleo'] = readFieldRobust(items,['núcleo','nucleo'],{kind:'nucleo',maxWidth:260});
-  I['Turma'] = readFieldRobust(items,['turma'],{kind:'turma',maxWidth:170});
-  const prof = readFieldRobust(items,['professor','instrutor'],{kind:'person',maxWidth:260});
-  const aux = readFieldRobust(items,['auxiliar'],{kind:'person',maxWidth:260});
-  const coord = readFieldRobust(items,['coordenador'],{kind:'person',maxWidth:260});
+  I['Núcleo'] = readFieldRobust(items,['núcleo','nucleo'],{kind:'nucleo'});
+  I['Turma'] = readFieldRobust(items,['turma'],{kind:'turma'});
+  I['Modalidade'] = readFieldRobust(items,['modalidade'],{kind:'modalidade'});
+  const prof = readFieldRobust(items,['professor','instrutor'],{kind:'person'});
+  const aux = readFieldRobust(items,['auxiliar','monitor'],{kind:'person'});
+  const coord = readFieldRobust(items,['coordenador'],{kind:'person'});
 
   I['Professor'] = prof;
   I['Auxiliar'] = aux;
   I['Coordenador'] = coord;
-  I['Horário'] = readFieldRobust(items,['horário','horario'],{kind:'horario',maxWidth:260});
+  I['Horário'] = readFieldRobust(items,['horário','horario'],{kind:'horario'});
 
   // Alguns modelos possuem a carga horária explicitamente no cabeçalho.
-  I['Carga horária apresentada'] = readHeaderField(
+  I['Carga horária apresentada'] = readFieldRobust(
     items,
-    ['carga horária','carga horaria','carga-horária','carga-horaria']
+    ['carga horária','carga horaria','carga-horária','carga-horaria'],
+    {kind:'horario'}
   );
 
   if (noInscritosTexto) {
@@ -1901,17 +2201,21 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
 
   const requiredFields = [
     ['Professor', prof, ['professor','instrutor']],
-    ['Auxiliar', aux, ['auxiliar']],
+    ['Auxiliar', aux, ['auxiliar','monitor']],
     ['Coordenador', coord, ['coordenador']]
   ];
 
   for (const [label,value,labels] of requiredFields) {
     if (value) {
-      add('ok', `Cabeçalho: ${label} identificado como ${value}.`);
+      if (personNeedsAttention(value)) {
+        add('wa', `ATENÇÃO: ${personLabelForRole(label)} identificado como "${value}", mas o nome aparenta estar incompleto (sem sobrenome). Confira o cabeçalho original.`);
+      } else {
+        add('ok', `Cabeçalho: ${label} identificado como ${value}.`);
+      }
     } else if (hasHeaderLabel(items, labels)) {
       add('er', `Cabeçalho: o campo ${label} foi localizado, mas o nome não pôde ser identificado com segurança.`);
     } else {
-      add('er', `Cabeçalho: não foi localizado o campo ${label}.`);
+      add('er', `Cabeçalho: não foi localizado o campo ${personLabelForRole(label)}.`);
     }
   }
 
@@ -2064,7 +2368,8 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
   const hdr = detectHeaderDays(gradeItems, mi, ano);
 
   const headerChecks = validateHeader(
-    items, mi, ano, dias, hdr, I['Horário'], I['Periodicidade'], I['Turma']
+    items, mi, ano, dias, hdr, I['Horário'], I['Periodicidade'], I['Turma'],
+    I['Núcleo'], I['Modalidade']
   );
 
   if (headerChecks.length) {
@@ -2220,7 +2525,15 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
       .join(' ')
       .trim();
 
-    if (!nome) return;
+    if (!nome || isNonBeneficiaryRowName(nome)) return;
+
+    const rowHasPresenceMark = r.it.some(i => /^[PAF-]$/i.test(String(i.s || '').trim()));
+    // Linhas fora da grade (assinaturas, rodapés e textos administrativos)
+    // normalmente não possuem nenhuma marcação P/A/-. Não as transformamos
+    // em beneficiários. Linhas reais, mesmo que vazias, são preservadas
+    // quando há evidência de linha numerada na borda esquerda.
+    const hasLeftRowNumber = r.it.some(i => i.x < (Math.min(...xList)-sp*0.85) && /^\d{1,3}$/.test(String(i.s||'').trim()));
+    if (!rowHasPresenceMark && !hasLeftRowNumber) return;
 
     const mk = {};
     const inv = [];
@@ -2234,7 +2547,7 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
        * Só P/A/"-" entram na conferência de presença.
        * Primeiro identificamos a data pelo calendário.
        */
-      if (!/^[PA]$|^[-–—_]$/.test(t)) {
+      if (!/^[PAF]$|^[-–—_]$/.test(t)) {
         if (!ocr && t.length <= 3 && /[A-Z]/.test(t)) {
           const found = dataMaisProxima(c);
           if (found) {
@@ -2252,7 +2565,7 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
 
       const key = found.data.key;
 
-      if (/^[PA]$/.test(t)) {
+      if (/^[PAF]$/.test(t)) {
         mk[key] = {
           status:t,
           day:found.data.day,
@@ -2323,7 +2636,7 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
 
     if (inv.length) {
       erros.push(
-        'caractere inválido (use P ou A): ' + inv.join(', ')
+        'caractere inválido (use P, A ou F): ' + inv.join(', ')
       );
     }
 
@@ -2338,34 +2651,34 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
     }
 
     /*
-     * Totais impressos.
-     * Eles ficam depois da grade e são lidos somente como números fora
-     * da faixa de datas; portanto não interferem na identificação das
-     * datas.
+     * CONFERÊNCIA QUANTITATIVA A/P — por beneficiário.
+     * O sistema conta novamente todos os P e A encontrados na grade e,
+     * quando as colunas de resumo estão identificadas, compara com os
+     * números impressos na própria linha. O percentual é recalculado a
+     * partir da contagem real: P / (P + A) * 100.
      */
-    const maxXData = Math.max(...xList);
-    const nums = r.it
-      .filter(i =>
-        i.x+i.w/2 > maxXData + sp*0.45 &&
-        /^\d+$/.test(i.s)
-      )
-      .sort((a,b) => a.x-b.x)
-      .map(i => Number(i.s));
-
     const cA = Object.values(mk).filter(v => v.status === 'A').length;
     const cP = Object.values(mk).filter(v => v.status === 'P').length;
     const cDash = Object.values(mk).filter(v => v.status === '-').length;
+    const totalMarcacoes = cA + cP;
+    const percentualCalculado = totalMarcacoes ? (cP / totalMarcacoes) * 100 : null;
 
-    if (
-      nums.length >= 2 &&
-      (nums[0] !== cA || nums[1] !== cP)
-    ) {
-      erros.push(
-        `totais impressos (A ${nums[0]} / P ${nums[1]}) diferem do contado (A ${cA} / P ${cP})`
+    const summaryColumns = findPresenceSummaryColumns(
+      gradeItems,
+      hy,
+      Math.max(...xList)
+    );
+    const printed = readPrintedPresenceTotals(r.it, summaryColumns, Math.max(...xList));
+
+    let quantitativeError = '';
+    if (printed) {
+      quantitativeError = describeQuantitativeError(
+        nome,
+        {a:cA,p:cP,dash:cDash},
+        printed
       );
+      if (quantitativeError) erros.push(quantitativeError);
     }
-
-    if (!Object.keys(mk).length) return;
 
     A.push({
       nome,
@@ -2374,9 +2687,26 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
       a:cA,
       dash:cDash,
       blank:previstasSemRegistro.length,
-      mk
+      mk,
+      quantitativo: {
+        contado: {p:cP,a:cA,total:totalMarcacoes,percentual:percentualCalculado},
+        impresso: printed || null,
+        divergente: !!quantitativeError
+      }
     });
+
+    /* A linha já foi adicionada acima. Não adicionar novamente: isso
+       duplicava artificialmente todos os beneficiários e fazia o detector
+       de duplicidade acusar nomes repetidos que só existiam uma vez no PDF. */
   });
+
+
+  if (hasNewPFModel) {
+    add(
+      'wa',
+      'NOVO MODELO DE LISTA DETECTADO — esta lista contém a marcação P/F e segue o novo modelo de lista exportado pelo sistema institutochaya.app. A marcação F foi reconhecida como parte desse modelo e não será tratada como caractere inválido.'
+    );
+  }
 
   /*
    * Resumo global baseado no CALENDÁRIO, não na posição das colunas.
@@ -2701,21 +3031,22 @@ function studentMatrix(r) {
     </div>`;
 }
 
-function render(name,r) {
+function render(name,r,allResults=[]) {
 
   /*
    * Duplicidade também precisa aparecer no resumo DA PRÓPRIA LISTA.
    * Aqui analisamos somente este bloco, sem misturar com os demais arquivos.
    * Duplicidade exata é erro; nomes apenas semelhantes são aviso.
    */
-  const localDup = detectDuplicates([{...r, __name:name}]);
-  const localExact = localDup.exact.filter(x => x.within);
-  const localFuzzy = localDup.fuzzy.filter(x => x.a.blockIndex === 0 && x.b.blockIndex === 0);
-
+  const globalDup = detectDuplicates(allResults);
+  const localExact = globalDup.exactWithin.filter(x => x.a.result === r && x.b.result === r);
+  const localFuzzy = globalDup.fuzzy.filter(x => (x.a.result === r && x.b.result === r));
+  const localCross = globalDup.exactCross.filter(x => x.a.result === r || x.b.result === r);
   const bad =
     r.C.some(c => c.t === 'er') ||
     r.A.some(a => a.erros.length) ||
-    localExact.length > 0;
+    localExact.length > 0 ||
+    localCross.length > 0;
 
   const warn =
     r.C.some(c => c.t === 'wa') ||
@@ -2743,7 +3074,27 @@ function render(name,r) {
         '</dl>' +
       '</div>';
 
+  const totalErros = r.C.filter(c=>c.t==='er').length + r.A.reduce((n,a)=>n+a.erros.length,0) + localExact.length + localCross.length;
+  const totalAvisos = r.C.filter(c=>c.t==='wa').length + localFuzzy.length;
+  const conclusao = r.semInscritos
+    ? 'Turma não possui inscritos.'
+    : totalErros
+      ? `${totalErros} inconsistência(s) que exigem correção/conferência.`
+      : totalAvisos
+        ? `${totalAvisos} aviso(s) para conferência manual.`
+        : 'Nenhuma inconsistência encontrada nos critérios automáticos.';
+
   h +=
+    '<div class="sec">' +
+      '<h3>Conclusão da análise</h3>' +
+      '<ul>' +
+        '<li class="' + (totalErros ? 'er' : totalAvisos ? 'wa' : 'ok') + '"><b>Resultado:</b> ' + esc(conclusao) + '</li>' +
+        '<li><b>Beneficiários identificados:</b> ' + (r.A.length ? r.A.length : 'nenhum') + (r.semInscritos ? ' — a lista declara que a turma não possui inscritos.' : '') + '</li>' +
+        '<li><b>Critério de presença:</b> P/A são vinculados à data real do calendário, e não apenas à posição da coluna.</li>' +
+        '<li><b>Critério de periodicidade:</b> dias da semana são convertidos para as datas reais do mês.</li>' +
+        '<li><b>Critério de feriados:</b> feriado com P/A é erro; feriado sem registro é informado como tal.</li>' +
+      '</ul>' +
+    '</div>' +
     '<div class="sec">' +
       '<h3>Resumo da lista</h3>' +
       '<ul>' +
@@ -2754,7 +3105,15 @@ function render(name,r) {
           ? localExact.map(x =>
               '<li class="er"><b>✘ Duplicidade identificada nesta lista:</b> ' +
               esc(x.a.nome) +
-              '. O mesmo beneficiário aparece mais de uma vez neste bloco/turma.</li>'
+              '. O mesmo beneficiário aparece mais de uma vez nesta lista.</li>'
+            ).join('')
+          : '') +
+        (localCross.length
+          ? localCross.map(x =>
+              '<li class="er"><b>✘ Mesmo beneficiário identificado em listas diferentes:</b> ' +
+              esc(x.a.nome) +
+              '. Encontrado em ' + esc(x.a.arquivo) + ' / ' + esc(x.a.turma) +
+              ' e em ' + esc(x.b.arquivo) + ' / ' + esc(x.b.turma) + '.</li>'
             ).join('')
           : '') +
         (localFuzzy.length
@@ -2926,7 +3285,7 @@ function exportVerificationPDF(results) {
 
   function statusFor(r) {
     const dup = detectDuplicates([{...r, __name:r.__name}]);
-    const exact = dup.exact.filter(x => x.within).length;
+    const exact = dup.exactWithin.length;
     const warn = r.C.some(c=>c.t==='wa') || dup.fuzzy.length > 0;
     if (r.C.some(c=>c.t==='er') || r.A.some(a=>a.erros.length) || exact) return 'COM ERROS';
     if (warn) return 'CORRETA, COM AVISOS';
@@ -2940,11 +3299,15 @@ function exportVerificationPDF(results) {
   section('Resumo geral');
   lines('Listas analisadas: ' + results.length, {bold:true});
   const globalDup = detectDuplicates(results);
-  lines('Duplicidades exatas: ' + globalDup.exact.length);
+  lines('Duplicidades confirmadas na mesma lista: ' + globalDup.exactWithin.length);
+  lines('Mesmo beneficiário encontrado em listas diferentes: ' + globalDup.exactCross.length);
   lines('Possíveis duplicidades: ' + globalDup.fuzzy.length);
 
-  globalDup.exact.forEach(x => {
-    lines('Duplicidade: ' + x.a.nome + ' - ' + x.a.arquivo + ' / ' + x.b.arquivo, {indent:4});
+  globalDup.exactWithin.forEach(x => {
+    lines('[ERRO] Duplicidade na mesma lista: ' + x.a.nome + ' - ' + x.a.arquivo + ' / ' + x.b.arquivo, {indent:4});
+  });
+  globalDup.exactCross.forEach(x => {
+    lines('[ERRO] Mesmo beneficiário em listas diferentes: ' + x.a.nome + ' - ' + x.a.arquivo + ' / ' + x.b.arquivo, {indent:4});
   });
   globalDup.fuzzy.forEach(x => {
     lines('Possível duplicidade: ' + x.a.nome + ' <-> ' + x.b.nome + ' (' + Math.round(x.similarity*100) + '%) - ' + x.a.arquivo + ' / ' + x.b.arquivo, {indent:4});
@@ -3014,6 +3377,7 @@ async function run(files) {
   if (!files.length) return;
 
   const analyzedResults = [];
+  const renderTargets = [];
 
   for (const f of files) {
     const box = document.createElement('div');
@@ -3048,6 +3412,14 @@ async function run(files) {
 
       if (progress) progress.style.width = '70%';
 
+      if (result.imagePages && result.imagePages.length === result.numPages) {
+        const ig = (result.integrity || []).map(x => '<li class="' + (x.ok === false ? 'er' : x.ok ? 'ok' : 'wa') + '">Assinatura de ' + esc(x.nome || 'signatário não identificado') +
+          (x.ok === false ? ': NÃO confere, o conteúdo foi alterado depois de assinado.' : x.ok ? ': confere com o que foi assinado.' : ': não foi possível verificar a integridade.') + '</li>').join('');
+        box.innerHTML = '<div class="card"><div class="hd"><h2>' + esc(f.name) + '</h2><span class="bg er">PDF adulterado</span>' +
+          '<p>Este PDF não tem camada de texto: foi convertido em imagem. Os dados exibidos <b>não são do arquivo original</b> gerado pela planilha e podem ter sido editados. A presença, a periodicidade e a carga horária não foram conferidas.</p></div>' +
+          '<div class="sec"><h3>Assinaturas digitais encontradas</h3><ul>' + (ig || '<li class="er">Nenhuma assinatura digital encontrada.</li>') + '</ul></div></div>';
+        continue;
+      }
       if (!result.items.length) {
         throw new Error(
           'Não consegui ler texto neste arquivo. Envie uma imagem mais nítida ou um PDF gerado da planilha.'
@@ -3066,11 +3438,19 @@ async function run(files) {
         holidays
       );
 
+      (result.integrity || []).forEach(x => analyzed.C.push({
+        t: x.ok === false ? 'er' : x.ok ? 'ok' : 'wa',
+        m: 'Integridade da assinatura de ' + (x.nome || 'signatário') + ': ' +
+           (x.ok === false ? 'NÃO confere. O PDF foi alterado depois de assinado (adulterado).' : x.ok ? 'conteúdo íntegro, igual ao que foi assinado.' : 'não foi possível verificar.')
+      }));
+      if (result.imagePages && result.imagePages.length)
+        analyzed.C.push({t:'er', m:'Página(s) ' + result.imagePages.join(', ') + ' sem camada de texto (convertidas em imagem): conteúdo não conferido e possivelmente adulterado.'});
       analyzed.__name = f.name;
       analyzedResults.push(analyzed);
+      renderTargets.push({box, name:f.name, result:analyzed});
 
       if (progress) progress.style.width = '100%';
-      box.innerHTML = render(f.name,analyzed);
+      box.innerHTML = render(f.name,analyzed,analyzedResults);
 
     } catch(e) {
       box.innerHTML =
@@ -3078,10 +3458,16 @@ async function run(files) {
           '<div class="hd">' +
             '<h2>' + esc(f.name) + '</h2>' +
             '<span class="bg er">Não foi possível ler</span>' +
-            '<p>' + esc(e && e.message ? e.message : 'Erro desconhecido.') + '</p>' +
+            '<p>' + esc(errText(e)) + '</p>' +
           '</div>' +
         '</div>';
     }
+  }
+
+  // Reprocessa os cartões das listas somente depois que TODOS os arquivos foram analisados.
+  // Isso permite que uma duplicidade entre arquivos marque AMBAS as listas como 'Com erros'.
+  for (const target of renderTargets) {
+    target.box.innerHTML = render(target.name, target.result, analyzedResults);
   }
 
   // Comparação por bloco: somente arquivos efetivamente analisados.
