@@ -331,7 +331,29 @@ function escolherCertificadoAssinante(certs) {
   return pessoais[0] || candidatos[0] || null;
 }
 
-async function signerInfoFromCms(hex) {
+function bytesToBinary(u8) {
+  const CHUNK = 0x8000;
+  let out = '';
+  for (let i=0; i<u8.length; i+=CHUNK) {
+    out += String.fromCharCode(...u8.subarray(i, Math.min(i+CHUNK,u8.length)));
+  }
+  return out;
+}
+
+function parseByteRangeAround(text, pos) {
+  const before = text.slice(Math.max(0,pos-6000), pos);
+  const m = /\/ByteRange\s*\[\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s*\]/i.exec(before);
+  return m ? m.slice(1).map(Number) : null;
+}
+
+function signerMatchesCertificate(signer, cert) {
+  if (!signer || !cert) return false;
+  const a = String(signer.serialNumber || '').replace(/^0+/,'').toLowerCase();
+  const b = String(cert.serialNumber || '').replace(/^0+/,'').toLowerCase();
+  return !!a && !!b && a === b;
+}
+
+async function signerInfoFromCms(hex, signedContentBinary='') {
   try {
     const forge = await loadForge();
     const bin = hexToBinary(hex);
@@ -342,16 +364,66 @@ async function signerInfoFromCms(hex) {
     const certs = Array.isArray(msg.certificates) ? msg.certificates : [];
     if (!certs.length) return null;
 
-    const cert = escolherCertificadoAssinante(certs);
+    /*
+     * Não escolhemos simplesmente o primeiro certificado. O SignerInfo do
+     * CMS referencia o certificado do assinante por issuer + serial. O
+     * serial é usado aqui como vínculo forte; só usamos a heurística da
+     * cadeia como fallback para PDFs fora do padrão.
+     */
+    const signerInfos = Array.isArray(msg.signerInfos) ? msg.signerInfos : [];
+    let cert = null;
+    let signerIndex = -1;
+
+    for (let i=0; i<signerInfos.length && !cert; i++) {
+      const si = signerInfos[i];
+      const c = certs.find(x => signerMatchesCertificate(si,x));
+      if (c) {
+        cert = c;
+        signerIndex = i;
+      }
+    }
+
+    cert = cert || escolherCertificadoAssinante(certs);
     if (!cert) return null;
 
     const info = certInfo(cert);
     if (!info.nome) return null;
 
-    const texto = [info.emissor,info.org,info.unidade].join(' ');
-    info.icpBrasil = /ICP[- ]?Brasil|ICP-Brasil/i.test(texto);
-    info.govbr = /gov\.br|governo federal/i.test(texto);
-    info.tipo = info.govbr ? 'GOV.BR' : (info.icpBrasil ? 'ICP-Brasil' : 'Certificado digital');
+    const texto = [
+      info.emissor, info.org, info.unidade, info.nome
+    ].join(' ');
+
+    info.icpBrasil = /ICP[- ]?Brasil|ICP-Brasil|AC\s*(Serpro|SERPRO|Certisign|Valid|Soluti|Serasa)/i.test(texto);
+    info.govbr = /gov\.br|governo federal|serpro/i.test(texto);
+    info.tipo = info.govbr ? 'GOV.BR/ICP-Brasil' :
+      (info.icpBrasil ? 'ICP-Brasil' : 'Certificado digital');
+    info.signerIndex = signerIndex;
+    info.signerVinculadoAoCertificado = signerIndex >= 0;
+
+    if (info.validoDe && info.validoAte) {
+      const now = Date.now();
+      info.certificadoDentroDaValidade =
+        now >= Date.parse(info.validoDe) && now <= Date.parse(info.validoAte);
+    } else {
+      info.certificadoDentroDaValidade = null;
+    }
+
+    /*
+     * Se tivermos o ByteRange, podemos fornecer ao CMS exatamente os bytes
+     * que o PDF declarou como conteúdo assinado. Isso permite uma tentativa
+     * de validação criptográfica local. Não confundimos falha do verificador
+     * com "assinatura inexistente".
+     */
+    info.validacao = null;
+    if (signedContentBinary && typeof msg.verify === 'function') {
+      try {
+        msg.content = forge.util.createBuffer(signedContentBinary, 'raw');
+        info.validacao = !!msg.verify();
+      } catch {
+        info.validacao = false;
+      }
+    }
+
     return info;
   } catch (e) {
     return null;
@@ -359,14 +431,9 @@ async function signerInfoFromCms(hex) {
 }
 
 async function readSigs(buf) {
-  const s = new TextDecoder('latin1').decode(buf);
+  const bytes = new Uint8Array(buf);
+  const s = new TextDecoder('latin1').decode(bytes);
   const out = [];
-
-  /*
-   * Primeiro procuramos Contents associados a ByteRange. Depois mantemos
-   * fallback para qualquer Contents hexadecimal grande, porque alguns
-   * geradores de PDF variam a ordem dos objetos.
-   */
   const re = /\/Contents\s*<([0-9A-Fa-f]{200,})>/g;
   let m;
   const seen = new Set();
@@ -377,18 +444,44 @@ async function readSigs(buf) {
     seen.add(hex);
 
     try {
+      const byteRange = parseByteRangeAround(s, m.index);
+      let signedContentBinary = '';
+      let byteRangeValid = false;
+
+      if (byteRange && byteRange.length === 4) {
+        const [o1,l1,o2,l2] = byteRange;
+        byteRangeValid =
+          o1 >= 0 && l1 >= 0 && o2 >= 0 && l2 >= 0 &&
+          o1 + l1 <= bytes.length &&
+          o2 + l2 <= bytes.length &&
+          o2 >= o1 + l1;
+
+        if (byteRangeValid) {
+          signedContentBinary = bytesToBinary(
+            Uint8Array.from([
+              ...bytes.slice(o1, o1+l1),
+              ...bytes.slice(o2, o2+l2)
+            ])
+          );
+        }
+      }
+
       const w = s.slice(
-        Math.max(0,m.index-2500),
-        Math.min(s.length,m.index+m[0].length+2500)
+        Math.max(0,m.index-3000),
+        Math.min(s.length,m.index+m[0].length+3000)
       );
 
       const d = /\/M\s*\(D:(\d{4})(\d{2})(\d{2})(?:\d{2})?(?:\d{2})?(?:\d{2})?/i.exec(w);
-      const info = await signerInfoFromCms(hex);
+      const sub = /\/SubFilter\s*\/([A-Za-z0-9.\-]+)/i.exec(w);
+      const info = await signerInfoFromCms(hex, signedContentBinary);
 
       if (info?.nome && !out.some(o => norm(o.nome) === norm(info.nome))) {
         out.push({
           ...info,
-          data:d ? `${d[3]}/${d[2]}/${d[1]}` : ''
+          data:d ? `${d[3]}/${d[2]}/${d[1]}` : '',
+          subFilter:sub ? sub[1] : '',
+          byteRange:byteRange || [],
+          byteRangeValid
         });
       }
     } catch {}
@@ -884,9 +977,119 @@ function readPeriodicity(items, currentValue='') {
   };
 }
 
-function buildCalendar(year, monthIndex, periodicityDays) {
+/* ================================================================
+ * FERIADOS — NACIONAIS
+ * ================================================================
+ * A lista é obtida preferencialmente da BrasilAPI, que possui endpoint
+ * específico para feriados nacionais e calcula os móveis. Mantemos um
+ * fallback local para o sistema continuar funcionando sem internet.
+ * Feriados estaduais/municipais não são inventados: podem ser acrescentados
+ * em FERIADOS_EXTRAS quando a unidade/localidade da lista for conhecida.
+ */
+const FERIADOS_EXTRAS = {
+  // Exemplo de configuração opcional:
+  // 2026: [{date:'2026-01-20', name:'São Sebastião', scope:'municipal'}]
+};
+
+const feriadoCache = new Map();
+
+function easterSunday(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19*a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2*e + 2*i - h - k) % 7;
+  const m = Math.floor((a + 11*h + 22*l) / 451);
+  const month = Math.floor((h + l - 7*m + 114) / 31);
+  const day = ((h + l - 7*m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+}
+
+function keyDate(dt) {
+  return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`;
+}
+
+function fallbackNationalHolidays(year) {
+  const out = [
+    [`${year}-01-01`, 'Confraternização Universal'],
+    [`${year}-04-21`, 'Tiradentes'],
+    [`${year}-05-01`, 'Dia Mundial do Trabalho'],
+    [`${year}-09-07`, 'Independência do Brasil'],
+    [`${year}-10-12`, 'Nossa Senhora Aparecida'],
+    [`${year}-11-02`, 'Finados'],
+    [`${year}-11-15`, 'Proclamação da República'],
+    [`${year}-11-20`, 'Dia Nacional de Zumbi e da Consciência Negra'],
+    [`${year}-12-25`, 'Natal']
+  ].map(([date,name]) => ({date,name,scope:'nacional'}));
+
+  // Sexta-feira da Paixão é incluída pela fonte externa quando classificada
+  // como feriado nacional. No fallback, não a inventamos como nacional.
+  return out;
+}
+
+async function loadHolidayCalendar(year) {
+  if (feriadoCache.has(year)) return feriadoCache.get(year);
+
+  let list = null;
+  try {
+    const resp = await fetch(`https://brasilapi.com.br/api/feriados/v1/${year}`, {
+      cache:'no-store'
+    });
+    if (resp.ok) {
+      const data = await resp.json();
+      if (Array.isArray(data)) {
+        list = data
+          .filter(x => x && x.date)
+          .map(x => ({
+            date:String(x.date).slice(0,10),
+            name:String(x.name || 'Feriado nacional').trim(),
+            type:String(x.type || 'feriado').trim(),
+            scope:'nacional'
+          }));
+      }
+    }
+  } catch {}
+
+  if (!list?.length) list = fallbackNationalHolidays(year);
+
+  const extras = Array.isArray(FERIADOS_EXTRAS[year])
+    ? FERIADOS_EXTRAS[year]
+    : [];
+
+  const merged = [...list, ...extras]
+    .filter(x => /^\d{4}-\d{2}-\d{2}$/.test(x.date))
+    .reduce((acc,x) => {
+      if (!acc.some(y => y.date === x.date && norm(y.name) === norm(x.name))) {
+        acc.push(x);
+      }
+      return acc;
+    }, [])
+    .sort((a,b) => a.date.localeCompare(b.date));
+
+  feriadoCache.set(year, merged);
+  return merged;
+}
+
+function holidayMapForMonth(year, monthIndex, holidays) {
+  const map = new Map();
+  (holidays || []).forEach(h => {
+    const m = String(h.date || '').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!m || Number(m[1]) !== year || Number(m[2]) !== monthIndex + 1) return;
+    map.set(h.date, h);
+  });
+  return map;
+}
+
+function buildCalendar(year, monthIndex, periodicityDays, holidays=[]) {
   const last = new Date(year, monthIndex + 1, 0).getDate();
   const dates = [];
+  const holidayMap = holidayMapForMonth(year, monthIndex, holidays);
 
   for (let day = 1; day <= last; day++) {
     const dt = new Date(year, monthIndex, day);
@@ -898,7 +1101,8 @@ function buildCalendar(year, monthIndex, periodicityDays) {
       weekday,
       weekdayName: NS[weekday],
       expected: periodicityDays.includes(weekday),
-      key: `${year}-${String(monthIndex + 1).padStart(2,'0')}-${String(day).padStart(2,'0')}`
+      key: `${year}-${String(monthIndex + 1).padStart(2,'0')}-${String(day).padStart(2,'0')}`,
+      holiday: holidayMap.get(`${year}-${String(monthIndex + 1).padStart(2,'0')}-${String(day).padStart(2,'0')}`) || null
     });
   }
 
@@ -1133,18 +1337,17 @@ function validateHeader(items, mi, ano, dias, hdr, horario, periodicidade, turma
   return checks;
 }
 
-function calculateWorkload(ano, mi, dias, horario, alunos) {
+function calculateWorkload(ano, mi, dias, horario, alunos, holidays=[]) {
   const duration = parseScheduleDuration(horario);
   const last = new Date(ano,mi+1,0).getDate();
   const dates = [];
 
   for (let d=1; d<=last; d++) {
     const dt = new Date(ano,mi,d);
-    if (dias.includes(dt.getDay())) {
-      dates.push({
-        day:d,
-        key:`${ano}-${String(mi+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`
-      });
+    const key = `${ano}-${String(mi+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const holiday = (holidays || []).find(h => h.date === key) || null;
+    if (dias.includes(dt.getDay()) && !holiday) {
+      dates.push({ day:d, key });
     }
   }
 
@@ -1347,7 +1550,7 @@ function globalValidationEvidence(results) {
 }
 
 
-function analyze(items,dsig,ocr,img,gridItems) {
+function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
   const C = [];
   const A = [];
   const I = {};
@@ -1461,10 +1664,16 @@ function analyze(items,dsig,ocr,img,gridItems) {
   } else if (!sig.length) {
     add('wa','Nenhuma assinatura digital (gov.br) identificável foi encontrada no PDF.');
   } else {
+    const sigResumo = sig.map(x => {
+      const tipo = x.tipo || 'Certificado digital';
+      const ver = x.validacao === true ? 'assinatura criptográfica conferida' :
+        x.validacao === false ? 'assinatura criptográfica não validada' :
+        'estrutura da assinatura identificada';
+      return `${x.nome} — ${tipo} — ${ver}` + (x.data ? ` — ${x.data}` : '');
+    }).join('; ');
     add(
-      'ok',
-      `Assinaturas digitais encontradas (${sig.length}): ` +
-      sig.map(x => x.nome + (x.data ? ` em ${x.data}` : '')).join('; ')
+      sig.some(x => x.validacao === false) ? 'wa' : 'ok',
+      `Assinaturas digitais encontradas (${sig.length}): ${sigResumo}`
     );
 
     const has = n => sig.some(s => {
@@ -1521,8 +1730,8 @@ function analyze(items,dsig,ocr,img,gridItems) {
    * modelo terminar com "1" do mês seguinte, a data não é deslocada.
    */
 
-  const calendario = buildCalendar(ano, mi, dias);
-  const previstas = calendario.filter(x => x.expected);
+  const calendario = buildCalendar(ano, mi, dias, holidays);
+  const previstas = calendario.filter(x => x.expected && !x.holiday);
   const hdr = detectHeaderDays(gradeItems, mi, ano);
 
   const headerChecks = validateHeader(
@@ -1624,6 +1833,10 @@ function analyze(items,dsig,ocr,img,gridItems) {
       : null;
   }
 
+  const holidayByKey = new Map(
+    calendario.filter(d => d.holiday).map(d => [d.key, d.holiday])
+  );
+
   /*
    * Interpretação das linhas de alunos.
    * Mantemos a lógica geométrica apenas para descobrir qual linha é de
@@ -1707,6 +1920,18 @@ function analyze(items,dsig,ocr,img,gridItems) {
       }
     });
 
+    /* Feriado preenchido: qualquer P/A em data de feriado é irregular,
+       mesmo se a data não fizer parte da periodicidade. */
+    const feriadosPreenchidos = Object.values(mk)
+      .filter(v => (v.status === 'P' || v.status === 'A') && holidayByKey.has(v.key));
+
+    feriadosPreenchidos.forEach(v => {
+      const h = holidayByKey.get(v.key);
+      erros.push(
+        `feriado preenchido como aula realizada em ${formatDateBR(ano,mi,v.day)}: ${h.name}`
+      );
+    });
+
     /*
      * Dias previstos pelo calendário que realmente possuem algum P/A.
      */
@@ -1720,7 +1945,7 @@ function analyze(items,dsig,ocr,img,gridItems) {
       .map(d => d.day);
 
     const foraDoCalendario = Object.values(mk)
-      .filter(v => !previstas.some(d => d.key === v.key) && v.status !== '-')
+      .filter(v => !previstas.some(d => d.key === v.key) && v.status !== '-' && !holidayByKey.has(v.key))
       .map(v => v.day)
       .sort((a,b) => a-b);
 
@@ -1809,6 +2034,42 @@ function analyze(items,dsig,ocr,img,gridItems) {
 
       registroGlobal.get(key).push(v.status);
     }
+  }
+
+  const feriadosComRegistro = [...registroGlobal.entries()]
+    .filter(([key,vals]) => holidayByKey.has(key) && vals.some(v => v === 'P' || v === 'A'))
+    .map(([key,vals]) => ({
+      key,
+      day: Number(key.slice(-2)),
+      holiday: holidayByKey.get(key),
+      statuses: vals
+    }))
+    .sort((a,b) => a.day-b.day);
+
+  if (feriadosComRegistro.length) {
+    add(
+      'er',
+      'FERIADO PREENCHIDO COMO AULA: ' +
+      feriadosComRegistro.map(x =>
+        `${formatDateBR(ano,mi,x.day)} — ${x.holiday.name}`
+      ).join('; ')
+    );
+  }
+
+  const feriadosDoMes = calendario.filter(d => d.holiday);
+  const feriadosSemRegistro = feriadosDoMes.filter(d => {
+    const vals = registroGlobal.get(d.key) || [];
+    return !vals.length || vals.every(v => v === '-');
+  });
+
+  if (feriadosSemRegistro.length) {
+    add(
+      'ok',
+      'Feriado(s) sem aula/sem P/A: ' +
+      feriadosSemRegistro.map(d =>
+        `${formatDateBR(ano,mi,d.day)} — ${d.holiday.name}`
+      ).join('; ')
+    );
   }
 
   const datasComPresenca = [...registroGlobal.keys()]
@@ -1904,7 +2165,7 @@ function analyze(items,dsig,ocr,img,gridItems) {
   }
 
   const cargaHoraria = calculateWorkload(
-    ano, mi, dias, I['Horário'], A
+    ano, mi, dias, I['Horário'], A, holidays
   );
 
   if (cargaHoraria.duration != null) {
@@ -1932,7 +2193,11 @@ function analyze(items,dsig,ocr,img,gridItems) {
     previstas,
     referencia: {mes: mi, ano},
     headerChecks,
-    cargaHoraria
+    cargaHoraria,
+    feriados: feriadosDoMes,
+    feriadosComRegistro,
+    holidays,
+    signaturas: sig
   };
 }
 
@@ -1950,10 +2215,11 @@ function calendarEvidence(r) {
   const alunos = r.A || [];
   const previstas = r.previstas || [];
   const calendario = r.calendario || [];
+  const feriados = (r.feriados || []).map(d => d.key);
 
-  if (!previstas.length) return '';
+  if (!calendario.length) return '';
 
-  const rows = previstas.map(d => {
+  const rows = calendario.map(d => {
     const vals = alunos
       .map(a => a.mk?.[d.key]?.status || '')
       .filter(Boolean);
@@ -1962,20 +2228,25 @@ function calendarEvidence(r) {
     const a = vals.filter(v => v === 'A').length;
     const dash = vals.filter(v => v === '-').length;
     const blank = Math.max(0, alunos.length - vals.length);
+    const isHoliday = !!d.holiday;
+    const filled = p + a > 0;
 
     let status = 'ok';
-    let label = 'Registrada';
+    let label = d.expected ? 'Registrada' : 'Fora da periodicidade';
 
-    if (!alunos.length) {
-      status = 'wa';
-      label = 'Sem alunos identificados';
-    } else if (blank === alunos.length) {
+    if (isHoliday && filled) {
       status = 'er';
-      label = 'Sem P/A';
-    } else if (blank > 0) {
+      label = 'FERIADO PREENCHIDO';
+    } else if (isHoliday && (blank === alunos.length || dash === alunos.length)) {
+      status = 'wa';
+      label = blank === alunos.length ? 'Feriado — em branco' : 'Feriado — sem aula';
+    } else if (d.expected && blank === alunos.length) {
+      status = 'wa';
+      label = 'Em branco';
+    } else if (d.expected && blank > 0) {
       status = 'wa';
       label = 'Parcial';
-    } else if (dash === alunos.length) {
+    } else if (d.expected && dash === alunos.length) {
       status = 'wa';
       label = '“-” para todos';
     }
@@ -1984,11 +2255,12 @@ function calendarEvidence(r) {
       <tr>
         <td><b>${esc(formatDateBR(r.referencia.ano,r.referencia.mes,d.day))}</b></td>
         <td>${weekdayShort(d.weekday)}</td>
-        <td><span class="pill expected">SIM</span></td>
+        <td>${d.expected ? '<span class="pill expected">SIM</span>' : '<span class="pill">NÃO</span>'}</td>
+        <td>${isHoliday ? `<span class="pill er">FERIADO</span><br><small>${esc(d.holiday.name)}</small>` : '—'}</td>
         <td>${p}</td>
         <td>${a}</td>
         <td>${dash}</td>
-        <td>${blank}</td>
+        <td>${d.expected ? blank : '—'}</td>
         <td><span class="pill ${status}">${label}</span></td>
       </tr>`;
   }).join('');
@@ -1997,21 +2269,16 @@ function calendarEvidence(r) {
     <div class="sec calendar-sec">
       <h3>Calendário real usado na conferência</h3>
       <p class="date-note">
-        As datas abaixo foram calculadas a partir de <b>${esc(MES[r.referencia.mes])}/${r.referencia.ano}</b>
-        e da periodicidade da lista. A posição da coluna não define a data.
+        A conferência exclui feriados das aulas previstas. Se houver <b>P</b> ou <b>A</b> em feriado,
+        o sistema registra erro: <b>feriado preenchido como aula realizada</b>. Se estiver em branco,
+        o sistema informa que o campo está em branco por ser feriado.
       </p>
       <div class="table-wrap">
         <table class="calendar-table">
           <thead>
             <tr>
-              <th>Data</th>
-              <th>Dia</th>
-              <th>Prevista</th>
-              <th>P</th>
-              <th>A</th>
-              <th>-</th>
-              <th>Em branco</th>
-              <th>Situação</th>
+              <th>Data</th><th>Dia</th><th>Prevista</th><th>Feriado</th>
+              <th>P</th><th>A</th><th>-</th><th>Em branco</th><th>Situação</th>
             </tr>
           </thead>
           <tbody>${rows}</tbody>
@@ -2077,11 +2344,23 @@ function studentMatrix(r) {
 
 function render(name,r) {
 
+  /*
+   * Duplicidade também precisa aparecer no resumo DA PRÓPRIA LISTA.
+   * Aqui analisamos somente este bloco, sem misturar com os demais arquivos.
+   * Duplicidade exata é erro; nomes apenas semelhantes são aviso.
+   */
+  const localDup = detectDuplicates([{...r, __name:name}]);
+  const localExact = localDup.exact.filter(x => x.within);
+  const localFuzzy = localDup.fuzzy.filter(x => x.a.blockIndex === 0 && x.b.blockIndex === 0);
+
   const bad =
     r.C.some(c => c.t === 'er') ||
-    r.A.some(a => a.erros.length);
+    r.A.some(a => a.erros.length) ||
+    localExact.length > 0;
 
-  const warn = r.C.some(c => c.t === 'wa');
+  const warn =
+    r.C.some(c => c.t === 'wa') ||
+    localFuzzy.length > 0;
 
   const st = bad
     ? ['er','Com erros']
@@ -2112,6 +2391,23 @@ function render(name,r) {
         r.C.map(c =>
           '<li class="' + c.t + '">' + esc(c.m) + '</li>'
         ).join('') +
+        (localExact.length
+          ? localExact.map(x =>
+              '<li class="er"><b>✘ Duplicidade identificada nesta lista:</b> ' +
+              esc(x.a.nome) +
+              '. O mesmo beneficiário aparece mais de uma vez neste bloco/turma.</li>'
+            ).join('')
+          : '') +
+        (localFuzzy.length
+          ? localFuzzy.map(x =>
+              '<li class="wa"><b>! Possível duplicidade nesta lista:</b> ' +
+              esc(x.a.nome) + ' ↔ ' + esc(x.b.nome) +
+              ' (' + Math.round(x.similarity * 100) + '% de semelhança). Confirme manualmente.</li>'
+            ).join('')
+          : '') +
+        (!r.C.length && !localExact.length && !localFuzzy.length
+          ? '<li class="ok">✓ Nenhuma inconsistência encontrada no resumo desta lista.</li>'
+          : '') +
       '</ul>' +
     '</div>';
 
@@ -2144,6 +2440,26 @@ function render(name,r) {
           r.headerChecks.map(c =>
             '<li class="' + c.t + '">' + esc(c.m) + '</li>'
           ).join('') +
+        '</ul>' +
+      '</div>';
+  }
+
+  if (r.signaturas?.length) {
+    h +=
+      '<div class="sec">' +
+        '<h3>Assinaturas digitais</h3>' +
+        '<ul>' +
+          r.signaturas.map(s => {
+            const st = s.validacao === true ? 'ok' : s.validacao === false ? 'wa' : 'wa';
+            const validade = s.validoDe && s.validoAte
+              ? ` · certificado ${esc(s.validoDe.slice(0,10))} a ${esc(s.validoAte.slice(0,10))}`
+              : '';
+            return `<li class="${st}"><b>${esc(s.nome || 'Assinante não identificado')}</b>` +
+              ` — ${esc(s.tipo || 'Certificado digital')}` +
+              `${s.emissor ? ` · Emissor: ${esc(s.emissor)}` : ''}` +
+              `${s.validacao === true ? ' · assinatura criptográfica conferida' : s.validacao === false ? ' · assinatura não validada criptograficamente' : ' · certificado identificado'}` +
+              `${validade}</li>`;
+          }).join('') +
         '</ul>' +
       '</div>';
   }
@@ -2227,12 +2543,16 @@ async function run(files) {
         );
       }
 
+      const ref = parseReference(result.items);
+      const holidays = ref?.ano ? await loadHolidayCalendar(ref.ano) : [];
+
       const analyzed = analyze(
         result.items,
         result.sigs,
         result.ocr,
         result.img,
-        result.gridItems || result.items
+        result.gridItems || result.items,
+        holidays
       );
 
       analyzed.__name = f.name;
