@@ -887,136 +887,140 @@ function parseReference(items) {
 function extractPeriodDays(per) {
   let raw = String(per || '')
     .replace(/[–—−]/g,'-')
-    .replace(/[(),;]/g,' ')
-    .replace(/([a-záéíóúãõç])([A-ZÁÉÍÓÚÃÕÇ])/g,'$1 $2');
+    .replace(/([a-záéíóúãõç])([A-ZÁÉÍÓÚÃÕÇ])/g,'$1 $2')
+    .replace(/([0-9])([a-záéíóúãõç])/gi,'$1 $2')
+    .replace(/([a-záéíóúãõç])([0-9])/gi,'$1 $2')
+    .replace(/\b(?:dia|dias)\s+da\s+semana\b/ig,' semana ')
+    .replace(/\bvez(?:es)?\s+(?:por|na)\s+semana\b/ig,' vezes na semana ')
+    .replace(/\bsemana(?=(?:domingo|segunda|segunda-feira|seg|terça|terca|ter|quarta|qua|quinta|qui|sexta|sex|sábado|sabado|sab)(?:\b|-))/ig,'semana ');
 
-  /*
-   * O PDF pode concatenar palavras de campos vizinhos, por exemplo:
-   * "02 vezes na semanaSegunda e Quarta".  Normalizamos esses casos
-   * antes de procurar os dias.
-   */
-  raw = raw
-    .replace(/semana(?=(?:domingo|segunda|terça|terca|quarta|quinta|sexta|sábado|sabado))/ig, 'semana ')
-    .replace(/(domingo|segunda|terça|terca|quarta|quinta|sexta|sábado|sabado)-?feira/ig, '$1');
-
-  const text = norm(raw).replace(/\s+/g,' ').trim();
-  const days = [];
-  const add = n => { if (!days.includes(n)) days.push(n); };
-
-  const aliases = [
-    [/\bdomingo\b/gi,0],
-    [/\bsegunda\b/gi,1],
-    [/\bterca\b/gi,2],
-    [/\bquarta\b/gi,3],
-    [/\bquinta\b/gi,4],
-    [/\bsexta\b/gi,5],
-    [/\bsabado\b/gi,6]
-  ];
-
-  for (const [re,n] of aliases) if (re.test(text)) add(n);
-
-  /* 1ª=domingo, 2ª=segunda, ..., 7ª=sábado. */
-  for (const m of text.matchAll(/\b([1-7])\s*(?:ª|a|º)\b/gi)) {
-    add(Number(m[1]) - 1);
-  }
-
-  /* OCR pode remover o ordinal e deixar "2 e 4". */
-  if (/\b(?:vez|vezes|semana|semanal|dias?)\b/i.test(text)) {
-    for (const m of text.matchAll(/(?:^|[\s/,-])([1-7])(?:\s*(?:e|\/)\s*([1-7]))+/gi)) {
-      add(Number(m[1]) - 1);
-      if (m[2]) add(Number(m[2]) - 1);
-    }
-  }
-
-  days.sort((a,b) => a-b);
-  const q = text.match(/\b(\d+)\s*vez(?:es)?\b/i);
-
-  return {
-    days,
-    frequency:q ? Number(q[1]) : null,
-    text
-  };
-}
-
-/*
- * Reconstrói a periodicidade a partir do texto real do formulário.
- * Alguns modelos deixam o rótulo "Periodicidade" vazio no primeiro
- * cabeçalho e imprimem o valor novamente no rodapé:
- *   "Periodicidade 02 vezes na semanaSegunda e Quarta Núcleo: ..."
- * Nunca usamos o texto do Coordenador/Núcleo como valor da periodicidade.
- */
-function readPeriodicity(items, currentValue='') {
-  const candidates = [];
-
-  const clean = value => String(value || '')
+  const text = norm(raw)
+    .replace(/\b(?:feira|feiras)\b/g,' ')
     .replace(/\s+/g,' ')
-    .replace(/\bperiodicidade\s*:??\s*/i,'')
-    /* corta o valor antes de outro campo do formulário */
-    .split(/(?=\b(?:núcleo|nucleo|turma|mês|mes|modalidade|professor|auxiliar|coordenador)\s*:)/i)[0]
     .trim();
 
-  const addCandidate = value => {
-    const v = clean(value);
-    if (!v) return;
-    const parsed = extractPeriodDays(v);
-    if (!parsed.days.length) return;
-    let score = parsed.days.length * 20;
-    if (parsed.frequency != null) score += 30;
-    if (/\bsemana\b/i.test(parsed.text)) score += 10;
-    candidates.push({value:v, parsed, score});
-  };
+  const days = [];
+  const add = n => { if (n >= 0 && n <= 6 && !days.includes(n)) days.push(n); };
 
-  addCandidate(currentValue);
+  // Nomes completos e formas abreviadas mais comuns em PDF/OCR.
+  const aliases = [
+    [/\b(?:domingo|dom)\b/gi,0],
+    [/\b(?:segunda|seg)\b/gi,1],
+    [/\b(?:terca|terça|ter)\b/gi,2],
+    [/\b(?:quarta|qua)\b/gi,3],
+    [/\b(?:quinta|qui)\b/gi,4],
+    [/\b(?:sexta|sex)\b/gi,5],
+    [/\b(?:sabado|sábado|sab)\b/gi,6]
+  ];
+  for (const [re,n] of aliases) if (re.test(text)) add(n);
 
-  /* Texto integral na ordem visual do documento. */
-  const joined = items
-    .slice()
-    .sort((a,b) => (a.page||0)-(b.page||0) || a.y-b.y || a.x-b.x)
-    .map(i => i.s)
-    .join(' ');
-
-  /*
-   * Primeiro tentamos o padrão explícito "Periodicidade ..." e cortamos
-   * antes do próximo campo. Isso evita capturar "Coordenador Geral ...".
-   */
-  const explicit = joined.match(
-    /periodicidade\s*:?\s*(.{0,220}?)(?=\b(?:núcleo|nucleo|turma|mês|mes|agosto|janeiro|fevereiro|março|marco|abril|maio|junho|julho|setembro|outubro|novembro|dezembro|modalidade|professor|auxiliar|coordenador)\s*:|$)/i
-  );
-
-  if (explicit) addCandidate(explicit[1]);
-
-  /* Procura diretamente por "N vezes na semana + dias" mesmo se
-     "semana" e o primeiro dia estiverem concatenados pelo PDF. */
-  const direct = joined.match(
-    /\b(\d+)\s*vez(?:es)?\s*na\s*semana\s*((?:segunda|terca|terça|quarta|quinta|sexta|sabado|sábado|domingo)(?:\s*(?:e|,|\/|segunda|terca|terça|quarta|quinta|sexta|sabado|sábado|domingo|-feira)[^\n]{0,80})?)/i
-  );
-  if (direct) addCandidate(`${direct[1]} vezes na semana ${direct[2]}`);
-
-  /* Candidatos espaciais: somente os que já contêm um dia da semana. */
-  const labels = items.filter(i => /^periodicidade\s*:??\s*$/i.test(String(i.s || '').trim()));
-  for (const label of labels) {
-    const nearby = items
-      .filter(i => {
-        if (i === label) return false;
-        const dy = i.y - label.y;
-        const dx = i.x - label.x;
-        return Math.abs(dy) <= 14 && dx > -5 && dx < 700;
-      })
-      .sort((a,b) => a.x-b.x)
-      .map(i => i.s)
-      .join(' ');
-    addCandidate(nearby);
+  // 1ª=domingo ... 7ª=sábado; também tolera OCR que remova o ordinal.
+  for (const m of text.matchAll(/(?:^|[\s,;\/\-])([1-7])\s*(?:ª|º|a)?(?=$|[\s,;\/\-])/gi)) {
+    // Não interpretar números como dia do mês se não houver contexto de periodicidade.
+    if (/\b(?:vez|vezes|semana|semanal|periodicidade|dias?)\b/i.test(text)) add(Number(m[1])-1);
   }
 
-  candidates.sort((a,b) => b.score-a.score);
+  // Expressões do tipo "2 e 4", "2,4", "2/4" ou "2 - 4".
+  if (/\b(?:vez|vezes|semana|semanal|periodicidade|dias?)\b/i.test(text)) {
+    const nums = [...text.matchAll(/(?:^|[\s,;\/\-])([1-7])(?=\s*(?:e|,|\/|\-|$))/gi)].map(m=>Number(m[1])-1);
+    nums.forEach(add);
+    const pair = text.match(/\b([1-7])\s*(?:e|,|\/|\-)\s*([1-7])\b/i);
+    if (pair) { add(Number(pair[1])-1); add(Number(pair[2])-1); }
+  }
 
-  if (candidates.length) return candidates[0];
+  days.sort((a,b)=>a-b);
+  const fq = text.match(/\b(\d{1,2})\s*(?:x|vez|vezes)\b/i) ||
+             text.match(/\b(\d{1,2})\s*(?:dias?)\s*(?:por|na)\s*semana\b/i);
 
-  return {
-    value:'',
-    parsed:{days:[],frequency:null,text:''},
-    score:-1
+  return { days, frequency:fq ? Number(fq[1]) : null, text };
+}
+
+/* Extrai campos mesmo quando o PDF separa rótulo e valor em objetos de texto. */
+function readFieldRobust(items, labels, options={}) {
+  const wanted = labels.map(x => norm(x));
+  const all = items.slice().sort((a,b)=>(a.page||0)-(b.page||0)||a.y-b.y||a.x-b.x);
+  const isLabel = s => wanted.includes(norm(String(s||'').replace(/:$/,'')));
+  const isOtherLabel = s => /^(?:núcleo|nucleo|turma|modalidade|professor|instrutor|coordenador|auxiliar|horário|horario|periodicidade|mês|mes|carga horária|carga horaria)\s*:?$/i.test(String(s||''));
+  const candidates=[];
+
+  for (const item of all) {
+    const raw=String(item.s||'').trim();
+    const low=norm(raw);
+    for (const label of wanted) {
+      const re=new RegExp('^'+label.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\s*:?\\s*(.*)$','i');
+      const m=raw.match(re);
+      if(m){
+        if(m[1].trim()) candidates.push({value:m[1].trim(),score:100,item});
+        else {
+          const near=all.filter(v=>v!==item && Math.abs(v.y-item.y)<=14 && v.x>item.x-5 && v.x<item.x+700 && !isOtherLabel(v.s))
+            .sort((a,b)=>a.x-b.x);
+          if(near.length) candidates.push({value:near.map(v=>v.s).join(' '),score:90,item});
+          const below=all.filter(v=>v!==item && v.y>item.y && v.y-item.y<=42 && Math.abs(v.x-item.x)<700 && !isOtherLabel(v.s))
+            .sort((a,b)=>a.y-b.y||a.x-b.x);
+          if(below.length) candidates.push({value:below.slice(0,8).map(v=>v.s).join(' '),score:80,item});
+        }
+      } else if(low===label){
+        const near=all.filter(v=>v!==item && Math.abs(v.y-item.y)<=14 && v.x>item.x-5 && v.x<item.x+700 && !isOtherLabel(v.s)).sort((a,b)=>a.x-b.x);
+        if(near.length) candidates.push({value:near.map(v=>v.s).join(' '),score:88,item});
+      }
+    }
+  }
+  candidates.sort((a,b)=>b.score-a.score);
+  return candidates[0]?.value || '';
+}
+
+function readPeriodicity(items, currentValue='') {
+  const candidates=[];
+  const stopField=/\b(?:núcleo|nucleo|turma|modalidade|professor|instrutor|auxiliar|coordenador|horário|horario|carga\s*horária|carga\s*horaria|mês|mes)\s*:?/i;
+  const addCandidate=(value,base=0)=>{
+    let v=String(value||'').replace(/\s+/g,' ').trim();
+    if(!v) return;
+    const parsed=extractPeriodDays(v);
+    if(!parsed.days.length) return;
+    let score=base+parsed.days.length*25;
+    if(parsed.frequency!=null) score+=35;
+    if(/\b(?:semana|semanal|vez|vezes)\b/i.test(parsed.text)) score+=20;
+    if(/periodicidade/i.test(v)) score+=10;
+    candidates.push({value:v,parsed,score});
   };
+
+  addCandidate(currentValue,40);
+
+  const all=items.slice().sort((a,b)=>(a.page||0)-(b.page||0)||a.y-b.y||a.x-b.x);
+  const joined=all.map(i=>i.s).join(' ');
+
+  // Procura TODAS as ocorrências de periodicidade, não apenas a primeira.
+  const re=/periodicidade\s*:?[\s]*/ig;
+  let m;
+  while((m=re.exec(joined))){
+    const tail=joined.slice(m.index+m[0].length,m.index+m[0].length+260);
+    const cut=tail.search(stopField);
+    addCandidate(cut>=0 ? tail.slice(0,cut) : tail,70);
+  }
+
+  // Forma direta: "02 vezes na semanaSegunda e Quarta" e equivalentes.
+  const directRe=/\b(\d{1,2})\s*(?:x|vez(?:es)?)\s*(?:por|na)\s*semana\s*([\s\S]{0,140})/ig;
+  while((m=directRe.exec(joined))){
+    let tail=m[2];
+    const cut=tail.search(stopField);
+    if(cut>=0) tail=tail.slice(0,cut);
+    addCandidate(`${m[1]} vezes na semana ${tail}`,85);
+  }
+
+  // Busca espacial pelo rótulo, inclusive quando o valor está abaixo dele.
+  // Implementação espacial sem arrow ambígua para compatibilidade.
+  for(const label of all.filter(i=>/^periodicidade\s*:??\s*$/i.test(String(i.s||'').trim()))){
+    const nearby=all.filter(i=>{
+      if(i===label) return false;
+      const dy=i.y-label.y, dx=i.x-label.x;
+      return ((Math.abs(dy)<=16 && dx>-5 && dx<750) || (dy>0 && dy<=48 && Math.abs(dx)<750));
+    }).filter(i=>!stopField.test(String(i.s||'')))
+      .sort((a,b)=>Math.abs(a.y-label.y)-Math.abs(b.y-label.y)||a.x-b.x);
+    if(nearby.length) addCandidate(nearby.slice(0,12).map(i=>i.s).join(' '),75);
+  }
+
+  candidates.sort((a,b)=>b.score-a.score);
+  return candidates[0] || {value:'',parsed:{days:[],frequency:null,text:''},score:-1};
 }
 
 /* ================================================================
@@ -1627,14 +1631,14 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
   const monthItem = items.find(i => MES.some(m => norm(m) === norm(i.s)));
   const CUT = monthItem ? monthItem.x : 1e9;
 
-  I['Núcleo'] = val(items,/^(?:núcleo|nucleo):\s*(.*)$/i,0,CUT);
-  I['Turma'] = val(items,/^turma:\s*(.*)$/i,0,CUT);
-  const prof = val(items,/^professor:\s*(.*)$/i,0,CUT);
-  const coord = val(items,/^coordenador:\s*(.*)$/i,0,CUT);
+  I['Núcleo'] = readFieldRobust(items,['núcleo','nucleo']);
+  I['Turma'] = readFieldRobust(items,['turma']);
+  const prof = readFieldRobust(items,['professor','instrutor']);
+  const coord = readFieldRobust(items,['coordenador']);
 
   I['Professor'] = prof;
   I['Coordenador'] = coord;
-  I['Horário'] = val(items,/^hor(?:ário|ario):?\s*(.*)$/i,0,CUT);
+  I['Horário'] = readFieldRobust(items,['horário','horario']);
 
   // Alguns modelos possuem a carga horária explicitamente no cabeçalho.
   I['Carga horária apresentada'] = readHeaderField(
@@ -1644,7 +1648,7 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
 
   const periodicidadeLida = readPeriodicity(
     items,
-    val(items,/^periodicidade:?\s*(.*)$/i,1,CUT)
+    readFieldRobust(items,['periodicidade'])
   );
 
   I['Periodicidade'] = periodicidadeLida.value || '';
