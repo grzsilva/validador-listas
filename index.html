@@ -936,87 +936,280 @@ function extractPeriodDays(per) {
 }
 
 /* Extrai campos mesmo quando o PDF separa rótulo e valor em objetos de texto. */
-function readFieldRobust(items, labels, options={}) {
+function fieldLabelRegex(labels) {
+  return new RegExp(
+    '^(' + labels
+      .map(x => norm(x).replace(/[.*+?^${}()|[\]\\]/g,'\\$&'))
+      .join('|') + ')\\s*:?\\s*(.*)$' ,
+    'i'
+  );
+}
+
+function isHeaderLabelText(value) {
+  const s = norm(String(value || '').replace(/:$/,''));
+  return /^(?:nucleo|turma|modalidade|professor|instrutor|coordenador|auxiliar|horario|periodicidade|mes|carga horaria)$/.test(s);
+}
+
+function cleanFieldValue(value) {
+  return String(value || '')
+    .replace(/\s+/g,' ')
+    .replace(/^[:\-–—]+\s*/,'')
+    .trim();
+}
+
+/*
+ * Lê campos do cabeçalho por geometria, sem assumir que o PDF entregou
+ * "RÓTULO: VALOR" no mesmo objeto de texto. O valor é procurado primeiro
+ * na MESMA LINHA e somente até o próximo rótulo. Isso evita que Professor,
+ * Coordenador e Auxiliar sejam misturados entre si.
+ */
+function headerLabelHits(items, labels){
   const wanted = labels.map(x => norm(x));
-  const all = items.slice().sort((a,b)=>(a.page||0)-(b.page||0)||a.y-b.y||a.x-b.x);
-  const isLabel = s => wanted.includes(norm(String(s||'').replace(/:$/,'')));
-  const isOtherLabel = s => /^(?:núcleo|nucleo|turma|modalidade|professor|instrutor|coordenador|auxiliar|horário|horario|periodicidade|mês|mes|carga horária|carga horaria)\s*:?$/i.test(String(s||''));
+  const re = fieldLabelRegex(labels);
+  return (items || []).filter(i => {
+    const raw = String(i.s || '').trim();
+    const bare = norm(raw.replace(/:$/,''));
+    return wanted.includes(bare) || re.test(raw);
+  }).sort((a,b)=>(a.page||0)-(b.page||0)||a.y-b.y||a.x-b.x);
+}
+
+function isHeaderNoise(s){
+  const n = norm(String(s || ''));
+  if (!n) return true;
+  if (/^(?:ausente|presente|a|p|%|% presenca|fim de semana|fim|de|semana)$/.test(n)) return true;
+  if (MES.some(m => n === norm(m))) return true;
+  if (/^\d{1,2}$/.test(n)) return true;
+  return false;
+}
+
+function personOnly(value){
+  let s = cleanFieldValue(value);
+  s = s.replace(/\b(?:nucleo|turma|modalidade|professor|instrutor|auxiliar|coordenador|horario|periodicidade|mes|carga horaria)\s*:?/ig,' ');
+  s = s.replace(/\b(?:ausente|presente|fim de semana|% presenca|presenca)\b.*$/i,' ');
+  s = s.replace(/\b\d+\b/g,' ');
+  s = s.replace(/\s+/g,' ').trim();
+  return s;
+}
+
+function horarioOnly(value){
+  /*
+   * O horário do cabeçalho não precisa estar em um padrão único.
+   * Exemplos aceitos: 8h às 9h30, 08:00-09:30, 8hrs as 9h30,
+   * 8 horas às 9 horas, 8 às 9:30, 08:00 até 09:30 e também
+   * descrições textuais como "período da manhã".
+   *
+   * Regra importante: se o campo existir, NÃO descartamos o conteúdo
+   * apenas porque não conseguimos convertê-lo em minutos.
+   */
+  let s = cleanFieldValue(String(value || ''))
+    .replace(/[–—−]/g,'-')
+    .replace(/\s+/g,' ')
+    .trim();
+
+  if (!s) return '';
+
+  // Remove somente rótulos de outros campos que possam ter vindo no mesmo objeto.
+  s = s.replace(/\b(?:nucleo|turma|modalidade|professor|instrutor|coordenador|auxiliar|horario|periodicidade|mes|carga horaria)\s*:?/ig,' ');
+  s = s.replace(/\s+/g,' ').trim();
+
+  // Formas numéricas de horário, incluindo "hrs", "hr", "hora(s)" e minutos opcionais.
+  const time = '(?:[01]?\\d|2[0-3])\\s*(?::\\s*[0-5]\\d|h(?:rs?|oras?)?(?:\\s*[0-5]\\d)?)?';
+  const timeRe = new RegExp('\\b(' + time + ')\\b','gi');
+  const matches = [...s.matchAll(timeRe)];
+
+  if (matches.length >= 2) {
+    const first = matches[0][1].replace(/\\s+/g,'').toLowerCase();
+    const second = matches[1][1].replace(/\\s+/g,'').toLowerCase();
+    return `${first} às ${second}`;
+  }
+
+  // Padrão frequente: "8 às 9h30", no qual o primeiro horário é apenas a hora.
+  const range = s.match(/\\b((?:[01]?\\d|2[0-3])(?:\\s*(?:h|hrs?|horas?))?)\\s*(?:às|as|a|ate|até|-|–|—)\\s*((?:[01]?\\d|2[0-3])(?:\\s*(?::\\s*[0-5]\\d|h(?:rs?|oras?)?(?:\\s*[0-5]\\d)?))?)\\b/i);
+  if (range) return `${range[1].replace(/\\s+/g,'').toLowerCase()} às ${range[2].replace(/\\s+/g,'').toLowerCase()}`;
+
+  // Não é um horário convencional, mas continua sendo uma informação válida
+  // do campo. Mantemos o texto para a conferência manual.
+  return cleanFieldValue(s);
+}
+
+function periodicityOnly(value){
+  let s = norm(String(value || ''));
+  s = s.replace(/-/g,' ');
+
+  const names = '(?:domingo|dom|segunda(?: feira)?|segunda-feira|seg|terça(?: feira)?|terca(?: feira)?|ter|quarta(?: feira)?|qua|quinta(?: feira)?|qui|sexta(?: feira)?|sex|sábado(?: feira)?|sabado(?: feira)?|sab)';
+  const full = new RegExp('((?:\\d{1,2}\\s*(?:x|vez(?:es)?)(?:\\s+(?:por|na)\\s+semana)?\\s*)?(?:'+names+')(?:(?:\\s*(?:e|,|/|-)\\s*)'+names+')*)','i');
+  const m = s.match(full);
+  if (m) {
+    const out = m[1].replace(/\s+/g,' ').trim();
+    return out;
+  }
+
+  const numeric = s.match(/(?:\d{1,2}\s*(?:vez(?:es)?|x)\s*(?:por|na)\s*semana\s*)?(?:[1-7]\s*(?:ª|º|a)?)(?:\s*(?:e|,|\/|-)\s*[1-7]\s*(?:ª|º|a)?)+/i);
+  return numeric ? numeric[0].replace(/\s+/g,' ').trim() : '';
+}
+
+/*
+ * Extrai UM campo do cabeçalho. Nunca usa o texto integral da linha/documento.
+ * A regra é: rótulo -> mesma linha -> próximo rótulo/limite -> valor.
+ */
+function readFieldRobust(items, labels, options={}) {
+  const hits = headerLabelHits(items, labels);
+  if (!hits.length) return '';
+
+  const kind = norm(options.kind || '');
+  const yTol = Number(options.sameRowTolerance ?? 4);
+  const maxWidth = Number(options.maxWidth || (kind === 'horario' ? 230 : 360));
+
+  const all = (items || []).slice().sort((a,b)=>(a.page||0)-(b.page||0)||a.y-b.y||a.x-b.x);
+  const isStop = s => isHeaderLabelText(s) || MES.some(m => norm(m) === norm(String(s||''))) || /^(?:ausente|presente|fim de semana|% presenca)$/i.test(norm(String(s||'')));
+
   const candidates=[];
 
-  for (const item of all) {
-    const raw=String(item.s||'').trim();
-    const low=norm(raw);
-    for (const label of wanted) {
-      const re=new RegExp('^'+label.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'\\s*:?\\s*(.*)$','i');
-      const m=raw.match(re);
-      if(m){
-        if(m[1].trim()) candidates.push({value:m[1].trim(),score:100,item});
-        else {
-          const near=all.filter(v=>v!==item && Math.abs(v.y-item.y)<=14 && v.x>item.x-5 && v.x<item.x+700 && !isOtherLabel(v.s))
-            .sort((a,b)=>a.x-b.x);
-          if(near.length) candidates.push({value:near.map(v=>v.s).join(' '),score:90,item});
-          const below=all.filter(v=>v!==item && v.y>item.y && v.y-item.y<=42 && Math.abs(v.x-item.x)<700 && !isOtherLabel(v.s))
-            .sort((a,b)=>a.y-b.y||a.x-b.x);
-          if(below.length) candidates.push({value:below.slice(0,8).map(v=>v.s).join(' '),score:80,item});
-        }
-      } else if(low===label){
-        const near=all.filter(v=>v!==item && Math.abs(v.y-item.y)<=14 && v.x>item.x-5 && v.x<item.x+700 && !isOtherLabel(v.s)).sort((a,b)=>a.x-b.x);
-        if(near.length) candidates.push({value:near.map(v=>v.s).join(' '),score:88,item});
+  for (const hit of hits) {
+    const raw=String(hit.s||'').trim();
+    const m=raw.match(fieldLabelRegex(labels));
+    if (m && cleanFieldValue(m[2])) {
+      let v=cleanFieldValue(m[2]);
+      if(kind==='horario') v=horarioOnly(v);
+      else if(kind==='person') v=personOnly(v);
+      if(v) candidates.push({value:v,score:130});
+      continue;
+    }
+
+    const page=hit.page||0;
+    const startX=hit.x+(hit.w||0)+1;
+    const row=all.filter(i=>{
+      if((i.page||0)!==page || i===hit) return false;
+      if(Math.abs(i.y-hit.y)>yTol) return false;
+      if(i.x < startX || i.x > startX+maxWidth) return false;
+      return true;
+    }).sort((a,b)=>a.x-b.x);
+
+    let picked=[];
+    for(const item of row){
+      const txt=cleanFieldValue(item.s);
+      if(!txt || isStop(txt)) break;
+      if(kind==='horario'){
+        // O conteúdo pode ser "8hrs as 9h30", "manhã", "integral", etc.
+        // O filtro de rótulos evita puxar as demais células do cabeçalho.
+        if(!isHeaderLabelText(txt) && !/^(?:ausente|presente|fim de semana|% presenca)$/i.test(norm(txt))) picked.push(txt);
+      } else if(kind==='person'){
+        if(/^[A-Za-zÀ-ÿ'’-]+(?:\s+[A-Za-zÀ-ÿ'’-]+)*$/.test(txt)) picked.push(txt);
+        else break;
+      } else {
+        picked.push(txt);
       }
+      if(picked.length>=8) break;
+    }
+
+    let value=picked.join(' ').trim();
+    if(kind==='horario') value=horarioOnly(value);
+    if(kind==='person') value=personOnly(value);
+    if(kind==='periodicidade') value=periodicityOnly(value);
+
+    if(value) {
+      candidates.push({
+        value,
+        score:120-Math.abs((row[0]?.y ?? hit.y)-hit.y)*4-(row[0]?.x ?? startX-hit.x)/100
+      });
+      continue;
+    }
+
+    /* Alguns PDFs agrupam o rótulo e o valor no objeto seguinte, embaixo. */
+    const below=all.filter(i=>
+      (i.page||0)===page && i!==hit && i.y>hit.y && i.y-hit.y<=18 &&
+      i.x>=hit.x-2 && i.x<=hit.x+maxWidth && !isStop(i.s)
+    ).sort((a,b)=>a.y-b.y||a.x-b.x);
+
+    if(below.length){
+      let v=below.slice(0,6).map(i=>i.s).join(' ');
+      if(kind==='horario') v=horarioOnly(v);
+      else if(kind==='person') v=personOnly(v);
+      else if(kind==='periodicidade') v=periodicityOnly(v);
+      if(v) candidates.push({value:cleanFieldValue(v),score:85});
     }
   }
+
+  const valid=v=>{
+    if(!v) return false;
+    if(kind==='person') return v.split(/\s+/).length>=2 && /[A-Za-zÀ-ÿ]/.test(v);
+    if(kind==='horario') return !!cleanFieldValue(v);
+    if(kind==='periodicidade') return periodicityOnly(v)!=='';
+    return /[A-Za-zÀ-ÿ0-9]/.test(v);
+  };
+
   candidates.sort((a,b)=>b.score-a.score);
-  return candidates[0]?.value || '';
+  const best=candidates.find(c=>valid(c.value));
+  return best ? cleanFieldValue(best.value) : '';
+}
+
+function hasHeaderLabel(items, labels) {
+  const wanted = labels.map(x => norm(x));
+  return (items || []).some(i => {
+    const raw = String(i.s || '').trim();
+    const bare = norm(raw.replace(/:$/,''));
+    return wanted.includes(bare) || wanted.some(w => new RegExp('^' + w.replace(/[.*+?^${}()|[\\]\\]/g,'\\$&') + '\\s*:?', 'i').test(raw));
+  });
+}
+
+function detectNoEnrolled(items) {
+  const joined = (items || [])
+    .slice()
+    .sort((a,b) => (a.page||0)-(b.page||0) || a.y-b.y || a.x-b.x)
+    .map(i => i.s)
+    .join(' ')
+    .replace(/\s+/g,' ')
+    .trim();
+
+  const n = norm(joined);
+  const patterns = [
+    /\bnao houve alunos?(?: nessa| nesta| na) turma\b/,
+    /\bnao houve inscritos?\b/,
+    /\bturma nao possui inscritos?\b/,
+    /\bnao possui inscritos?\b/,
+    /\bnao ha inscritos?\b/,
+    /\bsem inscritos?\b/,
+    /\bnenhum inscrito\b/,
+    /\bnao ha alunos?(?: nessa| nesta| na) turma\b/,
+    /\bnao possui alunos?(?: nessa| nesta| na) turma\b/
+  ];
+
+  for (const re of patterns) {
+    const m = n.match(re);
+    if (m) return m[0];
+  }
+  return '';
 }
 
 function readPeriodicity(items, currentValue='') {
   const candidates=[];
-  const stopField=/\b(?:núcleo|nucleo|turma|modalidade|professor|instrutor|auxiliar|coordenador|horário|horario|carga\s*horária|carga\s*horaria|mês|mes)\s*:?/i;
-  const addCandidate=(value,base=0)=>{
-    let v=String(value||'').replace(/\s+/g,' ').trim();
-    if(!v) return;
-    const parsed=extractPeriodDays(v);
+  const add=(v,score)=>{
+    const clean=periodicityOnly(v);
+    if(!clean) return;
+    const parsed=extractPeriodDays(clean);
     if(!parsed.days.length) return;
-    let score=base+parsed.days.length*25;
-    if(parsed.frequency!=null) score+=35;
-    if(/\b(?:semana|semanal|vez|vezes)\b/i.test(parsed.text)) score+=20;
-    if(/periodicidade/i.test(v)) score+=10;
-    candidates.push({value:v,parsed,score});
+    let sc=score+parsed.days.length*30+(parsed.frequency!=null?25:0);
+    candidates.push({value:clean,parsed,score:sc});
   };
 
-  addCandidate(currentValue,40);
+  add(currentValue,120);
 
-  const all=items.slice().sort((a,b)=>(a.page||0)-(b.page||0)||a.y-b.y||a.x-b.x);
-  const joined=all.map(i=>i.s).join(' ');
+  const all=(items||[]).slice().sort((a,b)=>(a.page||0)-(b.page||0)||a.y-b.y||a.x-b.x);
+  for(const label of headerLabelHits(all,['periodicidade'])){
+    const page=label.page||0;
+    const row=all.filter(i=>
+      (i.page||0)===page && i!==label && Math.abs(i.y-label.y)<=4 &&
+      i.x>label.x+(label.w||0) && i.x<label.x+330
+    ).sort((a,b)=>a.x-b.x);
+    const text=row.filter(i=>!isHeaderLabelText(i.s)).map(i=>i.s).join(' ');
+    add(text,140);
 
-  // Procura TODAS as ocorrências de periodicidade, não apenas a primeira.
-  const re=/periodicidade\s*:?[\s]*/ig;
-  let m;
-  while((m=re.exec(joined))){
-    const tail=joined.slice(m.index+m[0].length,m.index+m[0].length+260);
-    const cut=tail.search(stopField);
-    addCandidate(cut>=0 ? tail.slice(0,cut) : tail,70);
-  }
-
-  // Forma direta: "02 vezes na semanaSegunda e Quarta" e equivalentes.
-  const directRe=/\b(\d{1,2})\s*(?:x|vez(?:es)?)\s*(?:por|na)\s*semana\s*([\s\S]{0,140})/ig;
-  while((m=directRe.exec(joined))){
-    let tail=m[2];
-    const cut=tail.search(stopField);
-    if(cut>=0) tail=tail.slice(0,cut);
-    addCandidate(`${m[1]} vezes na semana ${tail}`,85);
-  }
-
-  // Busca espacial pelo rótulo, inclusive quando o valor está abaixo dele.
-  // Implementação espacial sem arrow ambígua para compatibilidade.
-  for(const label of all.filter(i=>/^periodicidade\s*:??\s*$/i.test(String(i.s||'').trim()))){
-    const nearby=all.filter(i=>{
-      if(i===label) return false;
-      const dy=i.y-label.y, dx=i.x-label.x;
-      return ((Math.abs(dy)<=16 && dx>-5 && dx<750) || (dy>0 && dy<=48 && Math.abs(dx)<750));
-    }).filter(i=>!stopField.test(String(i.s||'')))
-      .sort((a,b)=>Math.abs(a.y-label.y)-Math.abs(b.y-label.y)||a.x-b.x);
-    if(nearby.length) addCandidate(nearby.slice(0,12).map(i=>i.s).join(' '),75);
+    /* Valor abaixo do rótulo, sem varrer o restante do documento. */
+    const below=all.filter(i=>
+      (i.page||0)===page && i!==label && i.y>label.y && i.y-label.y<=18 &&
+      i.x>=label.x && i.x<label.x+330
+    ).sort((a,b)=>a.y-b.y||a.x-b.x);
+    add(below.slice(0,5).map(i=>i.s).join(' '),100);
   }
 
   candidates.sort((a,b)=>b.score-a.score);
@@ -1265,8 +1458,17 @@ function rowItems(items, y) {
  * ================================================================ */
 
 function parseTimeToMinutes(s) {
-  const m = String(s || '').match(/\b([01]?\d|2[0-3])\s*[:hH]\s*([0-5]\d)\b/);
-  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  const raw = String(s || '').toLowerCase().replace(/\s+/g,' ');
+  // 08:30
+  let m = raw.match(/\b([01]?\d|2[0-3])\s*:\s*([0-5]\d)\b/);
+  if (m) return Number(m[1]) * 60 + Number(m[2]);
+  // 8h30, 8hrs 30, 8 horas 30
+  m = raw.match(/\b([01]?\d|2[0-3])\s*(?:h|hr|hrs|hora|horas)\s*([0-5]\d)\b/);
+  if (m) return Number(m[1]) * 60 + Number(m[2]);
+  // 8h, 8hrs, 8 horas
+  m = raw.match(/\b([01]?\d|2[0-3])\s*(?:h|hr|hrs|hora|horas)\b/);
+  if (m) return Number(m[1]) * 60;
+  return null;
 }
 
 function formatHours(minutes) {
@@ -1279,8 +1481,25 @@ function formatHours(minutes) {
 
 function parseScheduleDuration(horario) {
   const s = String(horario || '').replace(/[–—−]/g,'-');
-  const times = [...s.matchAll(/\b([01]?\d|2[0-3])\s*[:hH]\s*([0-5]\d)\b/g)]
-    .map(m => Number(m[1])*60 + Number(m[2]));
+  const candidates = [
+    /\b(?:[01]?\d|2[0-3])\s*:\s*[0-5]\d\b/gi,
+    /\b(?:[01]?\d|2[0-3])\s*(?:h|hr|hrs|hora|horas)\s*(?:[0-5]\d)?\b/gi
+  ];
+  const found=[];
+  for (const re of candidates) {
+    for (const m of s.matchAll(re)) {
+      const min=parseTimeToMinutes(m[0]);
+      if (min!=null && !found.includes(min)) found.push(min);
+    }
+  }
+  // Preserva a ordem em que os horários aparecem no texto.
+  const ordered=[];
+  const all = [...s.matchAll(/\b(?:[01]?\d|2[0-3])\s*(?::\s*[0-5]\d|(?:h|hr|hrs|hora|horas)\s*(?:[0-5]\d)?)\b/gi)];
+  for (const m of all) {
+    const min=parseTimeToMinutes(m[0]);
+    if (min!=null && !ordered.includes(min)) ordered.push(min);
+  }
+  const times = ordered.length >= 2 ? ordered : found;
   if (times.length < 2) return null;
 
   let start = times[0], end = times[1];
@@ -1426,6 +1645,25 @@ function calculateWorkload(ano, mi, dias, horario, alunos, holidays=[]) {
     realizedClasses,
     realizedMinutes:realizedClasses * duration,
     dates
+  };
+}
+
+function beneficiaryNameCheck(name) {
+  const raw = String(name || '').trim();
+  const clean = norm(raw)
+    .replace(/\b(?:beneficiario|beneficiaria|aluno|aluna|nome)\b/g,' ')
+    .replace(/[^a-z0-9]+/g,' ')
+    .replace(/\s+/g,' ')
+    .trim();
+
+  const parts = clean ? clean.split(' ').filter(Boolean) : [];
+
+  return {
+    valid: parts.length >= 2,
+    parts,
+    message: parts.length === 1
+      ? `beneficiário com nome incompleto: "${raw}". Informe nome e sobrenome.`
+      : ''
   };
 }
 
@@ -1623,22 +1861,22 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
 
   const add = (t,m) => C.push({t,m});
 
-  if (ocr) {
-    add('wa','Leitura por OCR: o resultado é aproximado. Confira os apontamentos no arquivo original.');
-  }
+  const noInscritosTexto = detectNoEnrolled(items);
 
   const {mi,ano} = parseReference(items);
   const monthItem = items.find(i => MES.some(m => norm(m) === norm(i.s)));
   const CUT = monthItem ? monthItem.x : 1e9;
 
-  I['Núcleo'] = readFieldRobust(items,['núcleo','nucleo']);
-  I['Turma'] = readFieldRobust(items,['turma']);
-  const prof = readFieldRobust(items,['professor','instrutor']);
-  const coord = readFieldRobust(items,['coordenador']);
+  I['Núcleo'] = readFieldRobust(items,['núcleo','nucleo'],{kind:'nucleo',maxWidth:260});
+  I['Turma'] = readFieldRobust(items,['turma'],{kind:'turma',maxWidth:170});
+  const prof = readFieldRobust(items,['professor','instrutor'],{kind:'person',maxWidth:260});
+  const aux = readFieldRobust(items,['auxiliar'],{kind:'person',maxWidth:260});
+  const coord = readFieldRobust(items,['coordenador'],{kind:'person',maxWidth:260});
 
   I['Professor'] = prof;
+  I['Auxiliar'] = aux;
   I['Coordenador'] = coord;
-  I['Horário'] = readFieldRobust(items,['horário','horario']);
+  I['Horário'] = readFieldRobust(items,['horário','horario'],{kind:'horario',maxWidth:260});
 
   // Alguns modelos possuem a carga horária explicitamente no cabeçalho.
   I['Carga horária apresentada'] = readHeaderField(
@@ -1646,12 +1884,36 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
     ['carga horária','carga horaria','carga-horária','carga-horaria']
   );
 
+  if (noInscritosTexto) {
+    add('ok', 'Turma não possui inscritos. A grade de presença será tratada como sem beneficiários, sem gerar erro de P/A.');
+  }
+
+  if (ocr) {
+    add('wa','Leitura por OCR: o resultado é aproximado. Confira os apontamentos no arquivo original.');
+  }
+
   const periodicidadeLida = readPeriodicity(
     items,
-    readFieldRobust(items,['periodicidade'])
+    readFieldRobust(items,['periodicidade'],{kind:'periodicidade',maxWidth:260})
   );
 
   I['Periodicidade'] = periodicidadeLida.value || '';
+
+  const requiredFields = [
+    ['Professor', prof, ['professor','instrutor']],
+    ['Auxiliar', aux, ['auxiliar']],
+    ['Coordenador', coord, ['coordenador']]
+  ];
+
+  for (const [label,value,labels] of requiredFields) {
+    if (value) {
+      add('ok', `Cabeçalho: ${label} identificado como ${value}.`);
+    } else if (hasHeaderLabel(items, labels)) {
+      add('er', `Cabeçalho: o campo ${label} foi localizado, mas o nome não pôde ser identificado com segurança.`);
+    } else {
+      add('er', `Cabeçalho: não foi localizado o campo ${label}.`);
+    }
+  }
 
   if (mi == null || !ano) {
     return {
@@ -1810,6 +2072,26 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
       if (x.t === 'er') add('er', x.m);
       else if (x.t === 'wa') add('wa', x.m);
     });
+  }
+
+  /* Lista explicitamente sem inscritos: não transformar a grade vazia em
+     erro de calendário/P/A. Mantemos cabeçalho, periodicidade e assinaturas. */
+  if (noInscritosTexto) {
+    return {
+      C,
+      I,
+      A,
+      calendario,
+      previstas,
+      referencia:{mes:mi,ano},
+      headerChecks,
+      cargaHoraria:null,
+      feriados:calendario.filter(d => d.holiday),
+      feriadosComRegistro:[],
+      holidays,
+      signaturas:sig,
+      semInscritos:true
+    };
   }
 
   if (!hdr.length || hdr.length < Math.min(10, dim)) {
@@ -2043,6 +2325,16 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
       erros.push(
         'caractere inválido (use P ou A): ' + inv.join(', ')
       );
+    }
+
+    /*
+     * Validação do nome do beneficiário.
+     * Um nome com apenas uma palavra não é considerado um cadastro completo
+     * para a conferência da lista e deve aparecer como ERRO.
+     */
+    const nomeCheck = beneficiaryNameCheck(nome);
+    if (!nomeCheck.valid) {
+      erros.push(nomeCheck.message);
     }
 
     /*
