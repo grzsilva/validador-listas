@@ -105,6 +105,7 @@ button:hover{border-color:var(--ac)}
 
 .progress{margin-top:10px;height:6px;background:var(--bd);border-radius:99px;overflow:hidden}
 .progress>span{display:block;height:100%;width:0;background:var(--ac);transition:width .2s}
+.pdf-btn{display:inline-block;border:0;border-radius:10px;padding:10px 14px;background:var(--ac);color:#fff;font-weight:700;cursor:pointer;margin:6px 0}.pdf-btn:hover{opacity:.9}
 @media(max-width:560px){
   main{padding:16px 10px 36px}
   dl{grid-template-columns:1fr}
@@ -131,6 +132,7 @@ button:hover{border-color:var(--ac)}
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script>
 'use strict';
 
@@ -357,76 +359,92 @@ async function signerInfoFromCms(hex, signedContentBinary='') {
   try {
     const forge = await loadForge();
     const bin = hexToBinary(hex);
-    if (bin.length < 100) return null;
+    if (bin.length < 50) return {digital:true, signers:[], erro:'Conteúdo CMS muito curto.'};
 
     const asn1 = forge.asn1.fromDer(bin, false, false);
     const msg = forge.pkcs7.messageFromAsn1(asn1);
     const certs = Array.isArray(msg.certificates) ? msg.certificates : [];
-    if (!certs.length) return null;
-
-    /*
-     * Não escolhemos simplesmente o primeiro certificado. O SignerInfo do
-     * CMS referencia o certificado do assinante por issuer + serial. O
-     * serial é usado aqui como vínculo forte; só usamos a heurística da
-     * cadeia como fallback para PDFs fora do padrão.
-     */
     const signerInfos = Array.isArray(msg.signerInfos) ? msg.signerInfos : [];
-    let cert = null;
-    let signerIndex = -1;
 
-    for (let i=0; i<signerInfos.length && !cert; i++) {
+    const makeInfo = (cert, si, signerIndex) => {
+      const info = cert ? certInfo(cert) : {
+        nome:'', cpf:'', emissor:'', org:'', unidade:'',
+        subjectHash:'', issuerHash:'', serial:'', validoDe:'', validoAte:''
+      };
+
+      const texto = [info.emissor, info.org, info.unidade, info.nome].join(' ');
+      info.icpBrasil = /ICP[- ]?Brasil|ICP-Brasil|AC\s*(Serpro|SERPRO|Certisign|Valid|Soluti|Serasa)/i.test(texto);
+      info.govbr = /gov\.br|governo federal/i.test(texto);
+      info.tipo = info.govbr ? 'GOV.BR / certificado digital' :
+        (info.icpBrasil ? 'ICP-Brasil' : 'Certificado digital');
+      info.digital = true;
+      info.signerIndex = signerIndex;
+      info.signerVinculadoAoCertificado = !!cert;
+      info.algoritmoAssinatura = si?.digestAlgorithm?.algorithmOid || si?.digestAlgorithm?.name || '';
+
+      if (info.validoDe && info.validoAte) {
+        const now = Date.now();
+        info.certificadoDentroDaValidade =
+          now >= Date.parse(info.validoDe) && now <= Date.parse(info.validoAte);
+      } else {
+        info.certificadoDentroDaValidade = null;
+      }
+      return info;
+    };
+
+    const infos = [];
+    const used = new Set();
+
+    // Cada SignerInfo pode apontar para um certificado diferente.
+    for (let i=0; i<signerInfos.length; i++) {
       const si = signerInfos[i];
-      const c = certs.find(x => signerMatchesCertificate(si,x));
-      if (c) {
-        cert = c;
-        signerIndex = i;
+      const cert = certs.find(c => signerMatchesCertificate(si,c)) || null;
+      const info = makeInfo(cert, si, i);
+      const key = `${info.serial}|${info.nome}|${i}`;
+      if (!used.has(key)) {
+        used.add(key);
+        infos.push(info);
       }
     }
 
-    cert = cert || escolherCertificadoAssinante(certs);
-    if (!cert) return null;
-
-    const info = certInfo(cert);
-    if (!info.nome) return null;
-
-    const texto = [
-      info.emissor, info.org, info.unidade, info.nome
-    ].join(' ');
-
-    info.icpBrasil = /ICP[- ]?Brasil|ICP-Brasil|AC\s*(Serpro|SERPRO|Certisign|Valid|Soluti|Serasa)/i.test(texto);
-    info.govbr = /gov\.br|governo federal|serpro/i.test(texto);
-    info.tipo = info.govbr ? 'GOV.BR/ICP-Brasil' :
-      (info.icpBrasil ? 'ICP-Brasil' : 'Certificado digital');
-    info.signerIndex = signerIndex;
-    info.signerVinculadoAoCertificado = signerIndex >= 0;
-
-    if (info.validoDe && info.validoAte) {
-      const now = Date.now();
-      info.certificadoDentroDaValidade =
-        now >= Date.parse(info.validoDe) && now <= Date.parse(info.validoAte);
-    } else {
-      info.certificadoDentroDaValidade = null;
+    // PDF/CMS fora do padrão: ainda tentamos identificar o certificado final.
+    if (!infos.length && certs.length) {
+      const cert = escolherCertificadoAssinante(certs);
+      if (cert) infos.push(makeInfo(cert, null, -1));
     }
 
-    /*
-     * Se tivermos o ByteRange, podemos fornecer ao CMS exatamente os bytes
-     * que o PDF declarou como conteúdo assinado. Isso permite uma tentativa
-     * de validação criptográfica local. Não confundimos falha do verificador
-     * com "assinatura inexistente".
-     */
-    info.validacao = null;
-    if (signedContentBinary && typeof msg.verify === 'function') {
-      try {
-        msg.content = forge.util.createBuffer(signedContentBinary, 'raw');
-        info.validacao = !!msg.verify();
-      } catch {
-        info.validacao = false;
+    // Há CMS válidos em que a cadeia não vem incorporada. Não descartamos a
+    // assinatura digital só porque não conseguimos obter o nome do certificado.
+    if (!infos.length) {
+      infos.push(makeInfo(null, signerInfos[0] || null, 0));
+    }
+
+    for (const info of infos) {
+      info.validacao = null;
+      if (signedContentBinary && typeof msg.verify === 'function') {
+        try {
+          msg.content = forge.util.createBuffer(signedContentBinary, 'raw');
+          info.validacao = !!msg.verify();
+        } catch {
+          info.validacao = false;
+        }
       }
     }
 
-    return info;
+    return {
+      digital:true,
+      cms:true,
+      signers:infos,
+      nome:infos[0]?.nome || '',
+      ...infos[0]
+    };
   } catch (e) {
-    return null;
+    return {
+      digital:true,
+      cms:false,
+      signers:[],
+      erro:e?.message || 'Não foi possível interpretar o conteúdo CMS/PKCS#7.'
+    };
   }
 }
 
@@ -434,14 +452,13 @@ async function readSigs(buf) {
   const bytes = new Uint8Array(buf);
   const s = new TextDecoder('latin1').decode(bytes);
   const out = [];
-  const re = /\/Contents\s*<([0-9A-Fa-f]{200,})>/g;
+  const re = /\/Contents\s*<([0-9A-Fa-f]{80,})>/g;
   let m;
-  const seen = new Set();
+  let signatureNumber = 0;
 
   while ((m = re.exec(s))) {
+    signatureNumber++;
     const hex = m[1];
-    if (seen.has(hex)) continue;
-    seen.add(hex);
 
     try {
       const byteRange = parseByteRangeAround(s, m.index);
@@ -467,24 +484,49 @@ async function readSigs(buf) {
       }
 
       const w = s.slice(
-        Math.max(0,m.index-3000),
-        Math.min(s.length,m.index+m[0].length+3000)
+        Math.max(0,m.index-5000),
+        Math.min(s.length,m.index+m[0].length+5000)
       );
 
       const d = /\/M\s*\(D:(\d{4})(\d{2})(\d{2})(?:\d{2})?(?:\d{2})?(?:\d{2})?/i.exec(w);
       const sub = /\/SubFilter\s*\/([A-Za-z0-9.\-]+)/i.exec(w);
+      const field = /\/T\s*\(([^)]{1,200})\)/i.exec(w);
+      const type = /\/Type\s*\/([A-Za-z0-9]+)/i.exec(w);
       const info = await signerInfoFromCms(hex, signedContentBinary);
+      const signers = info?.signers?.length ? info.signers : [info || {digital:true}];
 
-      if (info?.nome && !out.some(o => norm(o.nome) === norm(info.nome))) {
-        out.push({
-          ...info,
+      signers.forEach((signer, idx) => {
+        const entry = {
+          ...signer,
+          digital:true,
+          assinaturaDigitalDetectada:true,
+          numeroAssinatura:signatureNumber,
+          assinanteIndex:idx,
           data:d ? `${d[3]}/${d[2]}/${d[1]}` : '',
           subFilter:sub ? sub[1] : '',
+          campo:field ? field[1] : '',
+          tipoPDF:type ? type[1] : '',
           byteRange:byteRange || [],
-          byteRangeValid
-        });
-      }
-    } catch {}
+          byteRangeValid,
+          formatoCMS:!!info?.cms
+        };
+        if (!out.some(o =>
+          o.numeroAssinatura === entry.numeroAssinatura &&
+          o.assinanteIndex === entry.assinanteIndex &&
+          norm(o.nome || '') === norm(entry.nome || '')
+        )) out.push(entry);
+      });
+    } catch (e) {
+      out.push({
+        digital:true,
+        assinaturaDigitalDetectada:true,
+        numeroAssinatura:signatureNumber,
+        nome:'',
+        tipo:'Assinatura digital detectada, assinante não identificado',
+        validacao:null,
+        erro:e?.message || 'Falha na leitura da assinatura digital.'
+      });
+    }
   }
 
   return out;
@@ -1446,6 +1488,25 @@ function detectDuplicates(results) {
   return {entries, exact, fuzzy};
 }
 
+function listSummaryEvidence(results) {
+  const d = detectDuplicates(results);
+  let h = `<div class="sec"><h3>Resumo das listas — inconsistências de duplicidade</h3>`;
+  if (!d.exact.length && !d.fuzzy.length) {
+    h += `<div class="alert-box ok"><strong>✓ Nenhuma duplicidade identificada.</strong> Não há beneficiários repetidos ou nomes altamente semelhantes entre as listas analisadas.</div>`;
+  } else {
+    h += `<div class="alert-box er"><strong>✘ Inconsistência de duplicidade identificada.</strong> Abaixo estão os nomes que exigem conferência.</div><ul>`;
+    d.exact.forEach(x => {
+      h += `<li class="er"><b>Duplicidade:</b> ${esc(x.a.nome)} — ${esc(x.a.arquivo)} / ${esc(x.a.turma)} ↔ ${esc(x.b.arquivo)} / ${esc(x.b.turma)}.</li>`;
+    });
+    d.fuzzy.forEach(x => {
+      h += `<li class="wa"><b>Possível duplicidade:</b> ${esc(x.a.nome)} ↔ ${esc(x.b.nome)} — ${Math.round(x.similarity*100)}% de semelhança. Confirmar manualmente.</li>`;
+    });
+    h += `</ul>`;
+  }
+  h += `</div>`;
+  return h;
+}
+
 function duplicateEvidence(results) {
   const d = detectDuplicates(results);
   const total = d.exact.length + d.fuzzy.length;
@@ -1662,18 +1723,20 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
       'Arquivo em imagem: assinaturas digitais não podem ser verificadas com segurança. Confira instrutor e coordenador no original.'
     );
   } else if (!sig.length) {
-    add('wa','Nenhuma assinatura digital (gov.br) identificável foi encontrada no PDF.');
+    add('wa','Nenhuma assinatura digital incorporada ao PDF foi identificada. Assinaturas manuscritas/imagens não são consideradas assinatura digital.');
   } else {
+    const nomesIdentificados = [...new Set(sig.map(x => (x.nome || '').trim()).filter(Boolean))];
     const sigResumo = sig.map(x => {
+      const nome = x.nome || 'assinante não identificado no certificado';
       const tipo = x.tipo || 'Certificado digital';
       const ver = x.validacao === true ? 'assinatura criptográfica conferida' :
         x.validacao === false ? 'assinatura criptográfica não validada' :
-        'estrutura da assinatura identificada';
-      return `${x.nome} — ${tipo} — ${ver}` + (x.data ? ` — ${x.data}` : '');
+        'assinatura digital detectada';
+      return `${nome} — ${tipo} — ${ver}` + (x.data ? ` — ${x.data}` : '');
     }).join('; ');
     add(
       sig.some(x => x.validacao === false) ? 'wa' : 'ok',
-      `Assinaturas digitais encontradas (${sig.length}): ${sigResumo}`
+      `Assinaturas digitais encontradas (${sig.length}). Nomes identificados: ${nomesIdentificados.length ? nomesIdentificados.join('; ') : 'não identificados nos certificados lidos'}. ${sigResumo}`
     );
 
     const has = n => sig.some(s => {
@@ -2496,6 +2559,158 @@ function render(name,r) {
   return h;
 }
 
+function pdfSafeText(value) {
+  return String(value ?? '')
+    .replace(/✓/g,'[OK]')
+    .replace(/✘/g,'[ERRO]')
+    .replace(/↔/g,'<->')
+    .replace(/·/g,' - ')
+    .replace(/—/g,' - ')
+    .replace(/–/g,' - ')
+    .replace(/²/g,'2');
+}
+
+function exportVerificationPDF(results) {
+  if (!window.jspdf || !window.jspdf.jsPDF) {
+    alert('Não foi possível carregar o gerador de PDF. Verifique a conexão com a internet e tente novamente.');
+    return;
+  }
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit:'mm', format:'a4' });
+  const margin = 14;
+  const pageW = 210;
+  const pageH = 297;
+  const maxW = pageW - margin * 2;
+  let y = 16;
+
+  function pageTitle(title) {
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(15);
+    doc.text(pdfSafeText(title), margin, y);
+    y += 8;
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(9);
+  }
+
+  function ensure(h=6) {
+    if (y + h > pageH - 14) {
+      doc.addPage();
+      y = 16;
+      doc.setFont('helvetica','normal');
+      doc.setFontSize(9);
+    }
+  }
+
+  function lines(text, opts={}) {
+    const size = opts.size || 9;
+    const bold = !!opts.bold;
+    const indent = opts.indent || 0;
+    const gap = opts.gap || 4.5;
+    doc.setFont('helvetica', bold ? 'bold' : 'normal');
+    doc.setFontSize(size);
+    const wrapped = doc.splitTextToSize(pdfSafeText(text), maxW - indent);
+    wrapped.forEach(line => {
+      ensure(gap);
+      doc.text(line, margin + indent, y);
+      y += gap;
+    });
+    y += 1;
+  }
+
+  function section(title) {
+    ensure(9);
+    doc.setFont('helvetica','bold');
+    doc.setFontSize(11);
+    doc.text(pdfSafeText(title), margin, y);
+    y += 6;
+    doc.setFont('helvetica','normal');
+    doc.setFontSize(9);
+  }
+
+  function statusFor(r) {
+    const dup = detectDuplicates([{...r, __name:r.__name}]);
+    const exact = dup.exact.filter(x => x.within).length;
+    const warn = r.C.some(c=>c.t==='wa') || dup.fuzzy.length > 0;
+    if (r.C.some(c=>c.t==='er') || r.A.some(a=>a.erros.length) || exact) return 'COM ERROS';
+    if (warn) return 'CORRETA, COM AVISOS';
+    return 'CORRETA';
+  }
+
+  pageTitle('Relatório de conferência das listas de presença');
+  lines('Gerado em ' + new Date().toLocaleString('pt-BR'), {size:8});
+  lines('Este relatório é uma reprodução da conferência realizada pelo sistema. A identificação de assinaturas e OCR pode exigir validação manual.', {size:8});
+
+  section('Resumo geral');
+  lines('Listas analisadas: ' + results.length, {bold:true});
+  const globalDup = detectDuplicates(results);
+  lines('Duplicidades exatas: ' + globalDup.exact.length);
+  lines('Possíveis duplicidades: ' + globalDup.fuzzy.length);
+
+  globalDup.exact.forEach(x => {
+    lines('Duplicidade: ' + x.a.nome + ' - ' + x.a.arquivo + ' / ' + x.b.arquivo, {indent:4});
+  });
+  globalDup.fuzzy.forEach(x => {
+    lines('Possível duplicidade: ' + x.a.nome + ' <-> ' + x.b.nome + ' (' + Math.round(x.similarity*100) + '%) - ' + x.a.arquivo + ' / ' + x.b.arquivo, {indent:4});
+  });
+
+  results.forEach((r, idx) => {
+    doc.addPage();
+    y = 16;
+    pageTitle('Lista ' + (idx+1) + ': ' + (r.__name || 'arquivo'));
+    lines('Situação: ' + statusFor(r), {bold:true});
+
+    section('Dados da lista');
+    Object.entries(r.I || {}).filter(([,v])=>v).forEach(([k,v]) => lines(k + ': ' + v));
+
+    section('Resumo da lista');
+    (r.C || []).forEach(c => lines((c.t==='er'?'[ERRO] ':c.t==='wa'?'[AVISO] ':'[OK] ') + c.m, {indent:2}));
+    const ld = detectDuplicates([{...r, __name:r.__name}]);
+    ld.exact.filter(x=>x.within).forEach(x => lines('[ERRO] Duplicidade nesta lista: ' + x.a.nome, {indent:2}));
+    ld.fuzzy.filter(x=>x.a.blockIndex===0 && x.b.blockIndex===0).forEach(x => lines('[AVISO] Possível duplicidade: ' + x.a.nome + ' <-> ' + x.b.nome + ' (' + Math.round(x.similarity*100) + '%)', {indent:2}));
+    if (!(r.C||[]).length && !ld.exact.length && !ld.fuzzy.length) lines('[OK] Nenhuma inconsistência encontrada no resumo.', {indent:2});
+
+    if ((r.feriados || []).length) {
+      section('Feriados');
+      (r.feriadosComRegistro || []).forEach(x => lines('[ERRO] Feriado preenchido como aula: ' + formatDateBR(r.referencia.ano,r.referencia.mes,x.day) + ' - ' + x.holiday.name, {indent:2}));
+      const sem = (r.feriados || []).filter(d => !(r.feriadosComRegistro||[]).some(x=>x.key===d.key));
+      sem.forEach(x => lines('[OK] Feriado sem aula/P/A: ' + formatDateBR(r.referencia.ano,r.referencia.mes,x.day) + ' - ' + x.name, {indent:2}));
+    }
+
+    if ((r.signaturas || []).length) {
+      section('Assinaturas digitais identificadas');
+      r.signaturas.forEach((s,i) => {
+        lines((i+1) + '. Nome: ' + (s.nome || 'Não identificado'));
+        lines('Tipo: ' + (s.tipo || 'Certificado digital') + (s.emissor ? ' | Emissor: ' + s.emissor : ''), {indent:4});
+        lines('Validação: ' + (s.validacao===true ? 'assinatura criptográfica conferida' : s.validacao===false ? 'assinatura não validada criptograficamente' : 'estrutura/certificado identificado'), {indent:4});
+        if (s.validoDe || s.validoAte) lines('Validade do certificado: ' + (s.validoDe||'?') + ' a ' + (s.validoAte||'?'), {indent:4});
+      });
+    } else {
+      section('Assinaturas digitais');
+      lines('[AVISO] Nenhuma assinatura digital identificável foi encontrada.');
+    }
+
+    if (r.cargaHoraria) {
+      section('Carga horária');
+      const w = r.cargaHoraria;
+      lines('Aulas previstas: ' + (w.expectedClasses ?? '-'));
+      lines('Carga prevista: ' + (w.expectedMinutes != null ? formatHours(w.expectedMinutes) : 'não calculada'));
+      lines('Aulas registradas: ' + (w.realizedClasses ?? '-'));
+      lines('Carga registrada: ' + (w.realizedMinutes != null ? formatHours(w.realizedMinutes) : 'não calculada'));
+    }
+
+    if ((r.A || []).length) {
+      section('Alunos');
+      r.A.forEach(a => {
+        lines(a.nome + ': P=' + a.p + ' | A=' + a.a + ' | -= ' + a.dash + ' | Em branco=' + a.blank + (a.erros.length ? ' | INCONSISTÊNCIAS: ' + a.erros.join('; ') : ''), {size:8});
+      });
+    }
+  });
+
+  const stamp = new Date().toISOString().slice(0,10);
+  doc.save('verificacao_listas_' + stamp + '.pdf');
+}
+
 async function run(files) {
   const out = document.getElementById('out');
   out.innerHTML = '';
@@ -2575,6 +2790,19 @@ async function run(files) {
 
   // Comparação por bloco: somente arquivos efetivamente analisados.
   if (analyzedResults.length >= 1) {
+    const download = document.createElement('div');
+    download.className = 'card';
+    download.innerHTML = `
+      <div class="hd">
+        <h2>Relatório da verificação</h2>
+        <button type="button" class="pdf-btn" id="downloadVerificationPdf">Baixar verificação das listas em PDF</button>
+        <p class="small">Gera um relatório consolidado com resumo, inconsistências, duplicidades, feriados, carga horária e assinaturas digitais identificadas.</p>
+      </div>`;
+    out.appendChild(download);
+    download.querySelector('#downloadVerificationPdf').addEventListener('click', () => {
+      exportVerificationPDF(analyzedResults);
+    });
+
     const global = document.createElement('div');
     global.innerHTML =
       '<div class="card">' +
@@ -2586,6 +2814,7 @@ async function run(files) {
             (analyzedResults.length > 1 ? 'Comparação concluída' : 'Validação concluída') +
           '</span>' +
         '</div>' +
+        listSummaryEvidence(analyzedResults) +
         duplicateEvidence(analyzedResults) +
         globalValidationEvidence(analyzedResults) +
         workloadEvidence(analyzedResults) +
