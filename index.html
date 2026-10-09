@@ -111,6 +111,7 @@ button:hover{border-color:var(--ac)}
   dl{grid-template-columns:1fr}
   dt{margin-top:5px}
 }
+.opt{display:block;margin:10px 2px 0;font:.9rem system-ui,sans-serif;color:var(--mu)}.opt input{margin-right:6px}
 </style>
 </head>
 <body>
@@ -128,6 +129,7 @@ button:hover{border-color:var(--ac)}
     <div class="small">PDF, PNG ou JPG</div>
   </label>
 
+  <label class="opt"><input type="checkbox" id="perPage" checked> Cada página do PDF é uma lista diferente (validar várias listas de um mesmo arquivo)</label>
   <div id="out" aria-live="polite"></div>
 </main>
 
@@ -717,6 +719,51 @@ async function checkSigIntegrity(buf) {
   return out;
 }
 
+
+/*
+ * Alguns PDFs (ex.: gerados pelo navegador) entregam o texto em pedaços de 1 a 3 letras
+ * ("T","u","r","m","a",":"). Aqui juntamos os pedaços vizinhos da mesma linha para que
+ * rótulos e nomes voltem a ser lidos inteiros. PDFs normais passam sem alteração.
+ */
+function mergeFragments(items) {
+  const rows = [];
+  items.slice().sort((a,b) => b.y-a.y || a.x-b.x).forEach(it => {
+    const r = rows[rows.length-1];
+    if (r && Math.abs(r.y-it.y) <= 1.2) r.items.push(it); else rows.push({y:it.y, items:[it]});
+  });
+  let adj = 0;
+  rows.forEach(r => {
+    r.items.sort((a,b) => a.x-b.x);
+    for (let k = 1; k < r.items.length; k++) {
+      const p = r.items[k-1], c = r.items[k], gap = c.x-(p.x+p.w);
+      if (gap <= 1.5 && gap >= -1.5 && p.s.length <= 3 && /[A-Za-zÀ-ÿ]/.test(p.s) && /[A-Za-zÀ-ÿ]/.test(c.s)) adj++;
+    }
+  });
+  const limpa = arr => arr.map(i => ({...i, s:i.s.replace(/\s+/g,' ').trim()})).filter(i => i.s);
+  if (adj < 25) return limpa(items);
+  const out = [];
+  rows.forEach(r => {
+    let cur = null;
+    for (const c of r.items) {
+      if (!c.s.trim()) { if (cur) cur.sp = true; continue; }
+      if (cur) {
+        const cw = cur.w/Math.max(1,cur.s.trim().length), gap = c.x-(cur.x+cur.w);
+        if (gap <= Math.max(2,0.8*cw) && gap >= -2) {
+          const novaPalavra = /[a-zà-ÿ]$/.test(cur.s) && /^[A-ZÀ-Ý]/.test(c.s);
+          cur.s += (cur.sp || gap >= 0.25*cw || novaPalavra ? ' ' : '') + c.s;
+          cur.sp = false;
+          cur.w = (c.x+c.w)-cur.x;
+          continue;
+        }
+        out.push(cur);
+      }
+      cur = {...c};
+    }
+    if (cur) out.push(cur);
+  });
+  return limpa(out);
+}
+
 async function extract(file) {
   const buf = await file.arrayBuffer();
 
@@ -755,15 +802,16 @@ async function extract(file) {
     const pg = await pdf.getPage(pageNo);
     const tc = await pg.getTextContent();
 
-    const pageItems = tc.items
+    const rawItems = tc.items
       .map(i => ({
-        s:String(i.str || '').trim(),
+        s:String(i.str || ''),
         x:i.transform[4],
         y:i.transform[5],
         w:i.width || 0,
         page:pageNo
       }))
-      .filter(i => i.s);
+      .filter(i => i.s.length);
+    const pageItems = mergeFragments(rawItems);
 
     /*
      * Se a página não tiver texto suficiente, renderizamos e aplicamos OCR.
@@ -1102,6 +1150,7 @@ function periodicityOnly(value){
   let s = cleanFieldValue(value)
     .split(/\b(?:n[uú]cleo|turma|modalidade|professor|instrutor|auxiliar|coordenador|monitor|hor[aá]rio|m[eê]s|carga hor[aá]ria|ausente|presente|benefici[aá]do)\b/i)[0];
   s = String(s || '').replace(/^\s*periodicidade\s*:?\s*/i,'').replace(/\s+/g,' ').trim();
+  s = s.replace(/(?:\s+[A-Za-zÀ-ÿ]){2,}\s*$/,'').trim();
   return s && extractPeriodDays(s).days.length ? s : '';
 }
 
@@ -2567,7 +2616,8 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
 
       if (/^[PAF]$/.test(t)) {
         mk[key] = {
-          status:t,
+          status:t === 'F' ? 'A' : t,
+          raw:t,
           day:found.data.day,
           date:found.data.date,
           key
@@ -2704,7 +2754,7 @@ function analyze(items,dsig,ocr,img,gridItems,holidays=[]) {
   if (hasNewPFModel) {
     add(
       'wa',
-      'NOVO MODELO DE LISTA DETECTADO — esta lista contém a marcação P/F e segue o novo modelo de lista exportado pelo sistema institutochaya.app. A marcação F foi reconhecida como parte desse modelo e não será tratada como caractere inválido.'
+      'NOVO MODELO DE LISTA DETECTADO — esta lista contém a marcação P/F e segue o novo modelo de lista exportado pelo sistema institutochaya.app. Neste modelo o F significa falta: cada F foi contabilizado como A (ausência) nas presenças, ausências, percentual e carga horária.'
     );
   }
 
@@ -2998,7 +3048,7 @@ function studentMatrix(r) {
         : 'blank';
 
       return `<td class="${cls}" title="${esc(formatDateBR(r.referencia.ano,r.referencia.mes,d.day))}">
-        ${st || '·'}
+        ${v?.raw === 'F' ? 'F' : (st || '·')}
       </td>`;
     }).join('');
 
@@ -3370,6 +3420,30 @@ function exportVerificationPDF(results) {
   doc.save('verificacao_listas_' + stamp + '.pdf');
 }
 
+
+/* Cada página com o título "LISTA DE PRESENÇA" é uma lista; páginas sem título continuam a anterior. */
+function groupLists(result, perPage) {
+  const all = { items: result.items || [], gridItems: result.gridItems || result.items || [], sigs: result.sigs, ocr: result.ocr, img: result.img, integrity: result.integrity, label: '' };
+  if (!perPage || !result.numPages || result.numPages < 2 || result.img) return [all];
+  const pages = [];
+  for (let p = 1; p <= result.numPages; p++) {
+    const its = all.items.filter(i => i.page === p);
+    pages.push({ p, its, title: its.some(i => /lista\s+de\s+presen/i.test(i.s)), empty: !its.length });
+  }
+  const groups = [];
+  pages.forEach(pg => {
+    const last = groups[groups.length - 1];
+    if (!last || pg.title || pg.empty || last.empty) groups.push({ pages: [pg.p], empty: pg.empty });
+    else last.pages.push(pg.p);
+  });
+  return groups.map(g => ({
+    ...all,
+    items: all.items.filter(i => g.pages.includes(i.page)),
+    gridItems: all.gridItems.filter(i => g.pages.includes(i.page)),
+    label: g.pages.length > 1 ? 'páginas ' + g.pages[0] + '–' + g.pages[g.pages.length - 1] : 'página ' + g.pages[0]
+  }));
+}
+
 async function run(files) {
   const out = document.getElementById('out');
   out.innerHTML = '';
@@ -3426,31 +3500,46 @@ async function run(files) {
         );
       }
 
-      const ref = parseReference(result.items);
-      const holidays = ref?.ano ? await loadHolidayCalendar(ref.ano) : [];
+      const perPage = document.getElementById('perPage');
+      const groups = groupLists(result, !perPage || perPage.checked);
 
-      const analyzed = analyze(
-        result.items,
-        result.sigs,
-        result.ocr,
-        result.img,
-        result.gridItems || result.items,
-        holidays
-      );
+      for (let gi = 0; gi < groups.length; gi++) {
+        const gb = gi === 0 ? box : out.appendChild(document.createElement('div'));
+        const sub = groups[gi];
+        const name = groups.length > 1 ? f.name + ' — ' + sub.label : f.name;
 
-      (result.integrity || []).forEach(x => analyzed.C.push({
-        t: x.ok === false ? 'er' : x.ok ? 'ok' : 'wa',
-        m: 'Integridade da assinatura de ' + (x.nome || 'signatário') + ': ' +
-           (x.ok === false ? 'NÃO confere. O PDF foi alterado depois de assinado (adulterado).' : x.ok ? 'conteúdo íntegro, igual ao que foi assinado.' : 'não foi possível verificar.')
-      }));
-      if (result.imagePages && result.imagePages.length)
-        analyzed.C.push({t:'er', m:'Página(s) ' + result.imagePages.join(', ') + ' sem camada de texto (convertidas em imagem): conteúdo não conferido e possivelmente adulterado.'});
-      analyzed.__name = f.name;
-      analyzedResults.push(analyzed);
-      renderTargets.push({box, name:f.name, result:analyzed});
+        if (!sub.items.length) {
+          gb.innerHTML = '<div class="card"><div class="hd"><h2>' + esc(name) + '</h2><span class="bg er">PDF adulterado</span>' +
+            '<p>Esta página não tem camada de texto: foi convertida em imagem. Os dados <b>não são do arquivo original</b> gerado pela planilha e podem ter sido editados. Não foi conferida.</p></div></div>';
+          continue;
+        }
 
-      if (progress) progress.style.width = '100%';
-      box.innerHTML = render(f.name,analyzed,analyzedResults);
+        const ref = parseReference(sub.items);
+        const holidays = ref?.ano ? await loadHolidayCalendar(ref.ano) : [];
+
+        const analyzed = analyze(
+          sub.items,
+          result.sigs,
+          result.ocr,
+          result.img,
+          sub.gridItems || sub.items,
+          holidays
+        );
+
+        (result.integrity || []).forEach(x => analyzed.C.push({
+          t: x.ok === false ? 'er' : x.ok ? 'ok' : 'wa',
+          m: 'Integridade da assinatura de ' + (x.nome || 'signatário') + ': ' +
+             (x.ok === false ? 'NÃO confere. O PDF foi alterado depois de assinado (adulterado).' : x.ok ? 'conteúdo íntegro, igual ao que foi assinado.' : 'não foi possível verificar.')
+        }));
+        if (false)
+          analyzed.C.push({t:'er', m:'Página(s) ' + result.imagePages.join(', ') + ' sem camada de texto (convertidas em imagem): conteúdo não conferido e possivelmente adulterado.'});
+        analyzed.__name = name;
+        analyzedResults.push(analyzed);
+        renderTargets.push({box:gb, name, result:analyzed});
+
+        if (progress) progress.style.width = '100%';
+        gb.innerHTML = render(name,analyzed,analyzedResults);
+      }
 
     } catch(e) {
       box.innerHTML =
